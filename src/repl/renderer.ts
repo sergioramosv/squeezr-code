@@ -109,7 +109,11 @@ export class Renderer {
     console.log()
     console.log(`${BOLD}◆ squeezr-code v${version}${RESET}`)
     console.log(`  Auth:    anthropic ${auth.anthropic ? GREEN + '✓' + RESET : RED + '✗' + RESET}  openai ${auth.openai ? GREEN + '✓' + RESET : RED + '✗' + RESET}  google ${auth.google ? GREEN + '✓' + RESET : RED + '✗' + RESET}`)
-    console.log(`  Proxy:   ${proxy.running ? GREEN + proxy.message + RESET : YELLOW + proxy.message + RESET}`)
+    if (proxy.running) {
+      console.log(`  Proxy:   ${GREEN}${proxy.message}${RESET} (compression enabled)`)
+    } else {
+      console.log(`  Proxy:   ${DIM}off — direct to API${RESET}`)
+    }
     console.log()
   }
 }

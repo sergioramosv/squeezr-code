@@ -12,14 +12,20 @@ interface AnthropicMessage {
   content: unknown
 }
 
+const ANTHROPIC_DIRECT_URL = 'https://api.anthropic.com'
+
 export class AnthropicAdapter implements APIAdapter {
   private baseUrl: string
   private getHeaders: () => Promise<Record<string, string>>
   private currentReader: ReadableStreamDefaultReader<Uint8Array> | null = null
   private fullContent: unknown[] = []
+  private usingProxy: boolean
 
-  constructor(proxyPort: number, getHeaders: () => Promise<Record<string, string>>) {
-    this.baseUrl = `http://localhost:${proxyPort}`
+  constructor(proxyPort: number | null, getHeaders: () => Promise<Record<string, string>>) {
+    this.usingProxy = proxyPort !== null
+    this.baseUrl = proxyPort !== null
+      ? `http://localhost:${proxyPort}`
+      : ANTHROPIC_DIRECT_URL
     this.getHeaders = getHeaders
   }
 

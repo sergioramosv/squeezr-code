@@ -7,7 +7,7 @@ export class APIClient {
 
   constructor(
     private auth: AuthManager,
-    private proxyPort: number,
+    private proxyPort: number | null,
   ) {}
 
   getAdapter(provider: Provider): APIAdapter {

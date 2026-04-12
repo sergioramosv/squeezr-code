@@ -20,14 +20,15 @@ export async function startREPL(config: SqConfig): Promise<void> {
   const auth = new AuthManager()
   const authStatus = await auth.init()
 
-  // Check proxy
+  // Check proxy (optional — sq works without it)
   const proxyStatus = await ensureProxy(config.proxy.port)
+  const proxyPort = proxyStatus.running ? config.proxy.port : null
 
   // Welcome
   renderer.renderWelcome(getVersion(), authStatus, proxyStatus)
 
-  // Init API client
-  const apiClient = new APIClient(auth, config.proxy.port)
+  // Init API client (null proxyPort = direct to API)
+  const apiClient = new APIClient(auth, proxyPort)
 
   // Init brain
   let currentModel = config.agent.default
