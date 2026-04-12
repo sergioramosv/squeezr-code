@@ -1,6 +1,8 @@
 import { APIError } from '../errors.js'
 import type { APIAdapter, NormalizedRequest, NormalizedStreamChunk } from './types.js'
 
+const ANTHROPIC_DIRECT_URL = 'https://api.anthropic.com'
+
 interface AnthropicTool {
   name: string
   description: string
@@ -12,17 +14,20 @@ interface AnthropicMessage {
   content: unknown
 }
 
-const ANTHROPIC_DIRECT_URL = 'https://api.anthropic.com'
+interface ContentBlockState {
+  type: 'text' | 'tool_use'
+  id?: string
+  name?: string
+  inputJson: string
+}
 
 export class AnthropicAdapter implements APIAdapter {
   private baseUrl: string
   private getHeaders: () => Promise<Record<string, string>>
   private currentReader: ReadableStreamDefaultReader<Uint8Array> | null = null
-  private fullContent: unknown[] = []
-  private usingProxy: boolean
+  private contentBlocks: Map<number, ContentBlockState> = new Map()
 
   constructor(proxyPort: number | null, getHeaders: () => Promise<Record<string, string>>) {
-    this.usingProxy = proxyPort !== null
     this.baseUrl = proxyPort !== null
       ? `http://localhost:${proxyPort}`
       : ANTHROPIC_DIRECT_URL
@@ -30,7 +35,7 @@ export class AnthropicAdapter implements APIAdapter {
   }
 
   async sendRequest(req: NormalizedRequest): Promise<void> {
-    this.fullContent = []
+    this.contentBlocks.clear()
 
     const tools: AnthropicTool[] = req.tools.map(t => ({
       name: t.name,
@@ -75,10 +80,11 @@ export class AnthropicAdapter implements APIAdapter {
     if (!res.ok) {
       const retryAfter = res.headers.get('retry-after')
       const retryable = res.status === 429 || res.status === 529 || res.status >= 500
+      const body = await res.text().catch(() => '')
       throw new APIError(
         'anthropic',
         res.status,
-        `${res.statusText}: ${await res.text().catch(() => '')}`,
+        `${res.statusText}: ${body}`,
         retryable,
         retryAfter ? parseInt(retryAfter, 10) * 1000 : undefined,
       )
@@ -105,7 +111,7 @@ export class AnthropicAdapter implements APIAdapter {
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue
         const data = line.slice(6).trim()
-        if (data === '[DONE]') return
+        if (!data || data === '[DONE]') continue
 
         let event: Record<string, unknown>
         try {
@@ -114,77 +120,106 @@ export class AnthropicAdapter implements APIAdapter {
           continue
         }
 
-        const type = event.type as string
-
-        if (type === 'content_block_delta') {
-          const delta = event.delta as Record<string, unknown>
-          if (delta.type === 'text_delta') {
-            yield { type: 'text', text: delta.text as string }
-          }
-          if (delta.type === 'input_json_delta') {
-            // Accumulate tool input JSON — handled in content_block_stop
-          }
-        }
-
-        if (type === 'content_block_start') {
-          const block = event.content_block as Record<string, unknown>
-          if (block.type === 'tool_use') {
-            this.fullContent.push(block)
-          }
-        }
-
-        if (type === 'content_block_stop') {
-          const idx = event.index as number
-          const block = this.fullContent[idx]
-          if (block && (block as Record<string, unknown>).type === 'tool_use') {
-            const tb = block as Record<string, unknown>
-            yield {
-              type: 'tool_use',
-              id: tb.id as string,
-              name: tb.name as string,
-              input: tb.input as Record<string, unknown>,
-            }
-          }
-        }
-
-        if (type === 'message_delta') {
-          const usage = (event.usage as Record<string, number>) || {}
-          if (usage.output_tokens) {
-            yield {
-              type: 'usage',
-              usage: {
-                inputTokens: 0,
-                outputTokens: usage.output_tokens,
-              },
-            }
-          }
-        }
-
-        if (type === 'message_start') {
-          const message = event.message as Record<string, unknown>
-          const usage = message?.usage as Record<string, number>
-          if (usage) {
-            yield {
-              type: 'usage',
-              usage: {
-                inputTokens: usage.input_tokens || 0,
-                outputTokens: usage.output_tokens || 0,
-                cacheRead: usage.cache_read_input_tokens || 0,
-              },
-            }
-          }
-        }
-
-        if (type === 'message_stop') {
-          yield { type: 'done' }
+        const chunks = this.processEvent(event)
+        for (const chunk of chunks) {
+          yield chunk
         }
       }
     }
   }
 
+  private processEvent(event: Record<string, unknown>): NormalizedStreamChunk[] {
+    const type = event.type as string
+    const chunks: NormalizedStreamChunk[] = []
+
+    switch (type) {
+      case 'message_start': {
+        const message = event.message as Record<string, unknown>
+        const usage = message?.usage as Record<string, number>
+        if (usage) {
+          chunks.push({
+            type: 'usage',
+            usage: {
+              inputTokens: usage.input_tokens || 0,
+              outputTokens: usage.output_tokens || 0,
+              cacheRead: usage.cache_read_input_tokens || 0,
+            },
+          })
+        }
+        break
+      }
+
+      case 'content_block_start': {
+        const idx = event.index as number
+        const block = event.content_block as Record<string, unknown>
+        if (block.type === 'text') {
+          this.contentBlocks.set(idx, { type: 'text', inputJson: '' })
+        } else if (block.type === 'tool_use') {
+          this.contentBlocks.set(idx, {
+            type: 'tool_use',
+            id: block.id as string,
+            name: block.name as string,
+            inputJson: '',
+          })
+        }
+        break
+      }
+
+      case 'content_block_delta': {
+        const idx = event.index as number
+        const delta = event.delta as Record<string, unknown>
+        const block = this.contentBlocks.get(idx)
+
+        if (delta.type === 'text_delta' && delta.text) {
+          chunks.push({ type: 'text', text: delta.text as string })
+        }
+
+        if (delta.type === 'input_json_delta' && block) {
+          block.inputJson += delta.partial_json as string
+        }
+        break
+      }
+
+      case 'content_block_stop': {
+        const idx = event.index as number
+        const block = this.contentBlocks.get(idx)
+        if (block?.type === 'tool_use') {
+          let input: Record<string, unknown> = {}
+          try {
+            input = JSON.parse(block.inputJson || '{}')
+          } catch { /* malformed — send empty */ }
+          chunks.push({
+            type: 'tool_use',
+            id: block.id,
+            name: block.name,
+            input,
+          })
+        }
+        break
+      }
+
+      case 'message_delta': {
+        const usage = (event.usage as Record<string, number>) || {}
+        if (usage.output_tokens) {
+          chunks.push({
+            type: 'usage',
+            usage: { inputTokens: 0, outputTokens: usage.output_tokens },
+          })
+        }
+        break
+      }
+
+      case 'message_stop': {
+        chunks.push({ type: 'done' })
+        break
+      }
+    }
+
+    return chunks
+  }
+
   async sendToolResult(_toolUseId: string, _result: string): Promise<void> {
     // For Anthropic, tool results are sent as part of the next sendRequest call
-    // This is a no-op — the loop handles adding tool results to messages
   }
 
   close(): void {
