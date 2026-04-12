@@ -1,0 +1,40 @@
+# ─── Modelo por defecto ───────────────────────────────────────
+[agent]
+default = "claude-sonnet-4-20250514"
+permissions = "default"                 # default | auto | yolo
+
+# ─── Brain: transplante de contexto ──────────────────────────
+[transplant]
+mode = "hybrid"                 # auto | manual | hybrid
+warn_threshold = 80
+auto_threshold = 95
+strategy = "replay"             # replay | summary | hybrid
+max_replay_messages = 30
+
+# ─── Proxy squeezr-ai ────────────────────────────────────────
+[proxy]
+enabled = true
+port = 8080
+
+# ─── Economist ────────────────────────────────────────────────
+[economist]
+enabled = true
+daily_budget = 0                # 0 = unlimited, or value in USD
+warn_at = 0
+
+# ─── Router ───────────────────────────────────────────────────
+[router]
+enabled = false
+
+[router.rules]
+debug = "claude-sonnet-4-20250514"
+write_tests = "o4-mini"
+review = "o3"
+explain = "claude-haiku-4-5-20251001"
+large_files = "gemini-2.5-pro"
+
+# ─── Display ──────────────────────────────────────────────────
+[display]
+show_cost = true
+show_context = true
+show_router = true
