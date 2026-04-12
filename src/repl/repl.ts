@@ -1,13 +1,10 @@
 import readline from 'node:readline'
 import path from 'node:path'
-import { agentLoop } from '../agent/loop.js'
-import { Brain } from '../brain/brain.js'
-import { APIClient } from '../api/client.js'
+import { SqProxy } from '../proxy/core.js'
 import { AuthManager } from '../auth/manager.js'
 import { Renderer } from './renderer.js'
 import { handleCommand } from './commands.js'
 import { askPermission } from '../tools/permissions.js'
-import { ensureProxy } from '../proxy/proxy.js'
 import { getVersion } from '../version.js'
 import type { SqConfig } from '../config.js'
 
@@ -20,40 +17,34 @@ export async function startREPL(config: SqConfig): Promise<void> {
   const auth = new AuthManager()
   const authStatus = await auth.init()
 
-  // Check proxy (optional — sq works without it)
-  const proxyStatus = await ensureProxy(config.proxy.port)
-  const proxyPort = proxyStatus.running ? config.proxy.port : null
+  // Init the internal proxy (the brain of sq)
+  const proxy = new SqProxy(auth, {
+    defaultModel: config.agent.default,
+    permissions: config.agent.permissions,
+    transplant: {
+      warnThreshold: config.transplant.warn_threshold,
+      autoThreshold: config.transplant.auto_threshold,
+    },
+  })
 
   // Welcome
-  renderer.renderWelcome(getVersion(), authStatus, proxyStatus)
-
-  // Init API client (null proxyPort = direct to API)
-  const apiClient = new APIClient(auth, proxyPort)
-
-  // Init brain
-  let currentModel = config.agent.default
-  const brain = new Brain(currentModel)
-
-  // Determine provider
-  let currentProvider = apiClient.providerForModel(currentModel)
+  renderer.renderWelcome(getVersion(), authStatus)
 
   // Check if we have auth for the default provider
-  if (!authStatus[currentProvider]) {
+  const defaultProvider = proxy.getCurrentProvider()
+  if (!authStatus[defaultProvider]) {
     const available = auth.authenticated()
     if (available.length === 0) {
       console.error('\x1b[31mNo providers authenticated. Run: sq login\x1b[0m')
       process.exit(1)
     }
-    // Fallback to first available
-    currentProvider = available[0]
     const modelMap: Record<string, string> = {
       anthropic: 'claude-sonnet-4-20250514',
       openai: 'o3',
       google: 'gemini-2.5-pro',
     }
-    currentModel = modelMap[currentProvider] || config.agent.default
-    brain.setModel(currentModel)
-    console.log(`  \x1b[33mDefault provider not available. Using ${currentProvider} (${currentModel})\x1b[0m\n`)
+    proxy.setModel(modelMap[available[0]] || config.agent.default)
+    console.log(`  \x1b[33mDefault provider not available. Using ${available[0]} (${proxy.getCurrentModel()})\x1b[0m\n`)
   }
 
   // REPL
@@ -62,21 +53,18 @@ export async function startREPL(config: SqConfig): Promise<void> {
     output: process.stdout,
     prompt: renderer.renderStatus({
       project: projectName,
-      branch: undefined,
-      contextPercent: brain.getState().contextPercent,
+      contextPercent: 0,
       costUsd: 0,
-      model: currentModel,
+      model: proxy.getCurrentModel(),
     }),
   })
-
-  let totalCostUsd = 0
 
   const updatePrompt = () => {
     rl.setPrompt(renderer.renderStatus({
       project: projectName,
-      contextPercent: brain.getState().contextPercent,
-      costUsd: totalCostUsd,
-      model: currentModel,
+      contextPercent: proxy.getBrainState().contextPercent,
+      costUsd: proxy.getTotalCost(),
+      model: proxy.getCurrentModel(),
     }))
   }
 
@@ -91,20 +79,16 @@ export async function startREPL(config: SqConfig): Promise<void> {
 
     // Slash commands
     const cmdResult = handleCommand(input, {
-      brain,
-      model: currentModel,
-      setModel: (m: string) => {
-        currentModel = m
-        currentProvider = apiClient.providerForModel(m)
-        brain.setModel(m)
-      },
+      brain: { getState: () => proxy.getBrainState() } as any,
+      model: proxy.getCurrentModel(),
+      setModel: (m: string) => proxy.setModel(m),
     })
 
     if (cmdResult) {
       console.log(cmdResult.output)
       if (cmdResult.exit) {
         rl.close()
-        apiClient.closeAll()
+        proxy.shutdown()
         process.exit(0)
       }
       updatePrompt()
@@ -114,8 +98,7 @@ export async function startREPL(config: SqConfig): Promise<void> {
 
     // Model override with @model
     let prompt = input
-    let model = currentModel
-    let provider = currentProvider
+    let overrideModel: string | undefined
     const atMatch = input.match(/^@(\S+)\s+(.+)$/s)
     if (atMatch) {
       const aliases: Record<string, string> = {
@@ -128,44 +111,20 @@ export async function startREPL(config: SqConfig): Promise<void> {
         'gemini-pro': 'gemini-2.5-pro',
         'gemini-flash': 'gemini-2.5-flash',
       }
-      model = aliases[atMatch[1]] || atMatch[1]
-      provider = apiClient.providerForModel(model)
+      overrideModel = aliases[atMatch[1]] || atMatch[1]
       prompt = atMatch[2]
     }
 
-    // Run agent loop
+    // Send through the proxy
     try {
-      const loop = agentLoop(prompt, {
-        provider,
-        model,
+      const events = proxy.send(prompt, {
+        model: overrideModel,
         cwd,
-        permissions: config.agent.permissions,
-      }, {
-        apiClient,
         askPermission: config.agent.permissions === 'yolo' ? undefined : askPermission,
       })
 
-      for await (const event of loop) {
+      for await (const event of events) {
         renderer.renderEvent(event)
-
-        if (event.usage) {
-          brain.addUsage(event.usage.inputTokens, event.usage.outputTokens)
-        }
-
-        // Simple cost tracking (Anthropic pricing)
-        if (event.type === 'cost' && event.usage) {
-          const inputCost = (event.usage.inputTokens / 1_000_000) * 3.00
-          const outputCost = (event.usage.outputTokens / 1_000_000) * 15.00
-          totalCostUsd += inputCost + outputCost
-        }
-
-        // Context warning
-        if (event.type === 'done') {
-          const state = brain.getState()
-          if (state.contextPercent >= config.transplant.warn_threshold) {
-            console.log(`\n  \x1b[33m⚠ Context at ${state.contextPercent}% — transplant at ${config.transplant.auto_threshold}%\x1b[0m`)
-          }
-        }
       }
     } catch (err) {
       console.error(`\n  \x1b[31mError: ${err instanceof Error ? err.message : String(err)}\x1b[0m`)
@@ -177,7 +136,7 @@ export async function startREPL(config: SqConfig): Promise<void> {
   })
 
   rl.on('close', () => {
-    apiClient.closeAll()
+    proxy.shutdown()
     process.exit(0)
   })
 }

@@ -105,15 +105,10 @@ export class Renderer {
     return model.slice(0, 12)
   }
 
-  renderWelcome(version: string, auth: { anthropic: boolean; openai: boolean; google: boolean }, proxy: { running: boolean; message: string }): void {
+  renderWelcome(version: string, auth: { anthropic: boolean; openai: boolean; google: boolean }): void {
     console.log()
     console.log(`${BOLD}◆ squeezr-code v${version}${RESET}`)
     console.log(`  Auth:    anthropic ${auth.anthropic ? GREEN + '✓' + RESET : RED + '✗' + RESET}  openai ${auth.openai ? GREEN + '✓' + RESET : RED + '✗' + RESET}  google ${auth.google ? GREEN + '✓' + RESET : RED + '✗' + RESET}`)
-    if (proxy.running) {
-      console.log(`  Proxy:   ${GREEN}${proxy.message}${RESET} (compression enabled)`)
-    } else {
-      console.log(`  Proxy:   ${DIM}off — direct to API${RESET}`)
-    }
     console.log()
   }
 }

@@ -74,31 +74,41 @@ export class AnthropicAuth {
   async ensureValid(): Promise<string> {
     if (!this.creds) throw new AuthError('anthropic', 'Not authenticated. Run: sq login anthropic')
 
+    // Token still valid
     if (Date.now() < this.creds.expiresAt - 60_000) {
       return this.creds.accessToken
     }
 
-    const res = await fetch('https://console.anthropic.com/v1/oauth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        grant_type: 'refresh_token',
-        refresh_token: this.creds.refreshToken,
-      }),
-    })
-
-    if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
-        throw new AuthError('anthropic', `Token revoked or expired. Run: sq login anthropic`)
-      }
-      throw new AuthError('anthropic', `Token refresh failed: ${res.status} ${res.statusText}`)
+    // Token expired — try reimport from Claude Code first (it auto-refreshes)
+    const reimported = await this.reimport()
+    if (reimported && this.creds && Date.now() < this.creds.expiresAt - 60_000) {
+      return this.creds.accessToken
     }
 
-    const data = await res.json() as { access_token: string; expires_in: number }
-    this.creds.accessToken = data.access_token
-    this.creds.expiresAt = Date.now() + data.expires_in * 1000
-    this.persist()
-    return this.creds.accessToken
+    // Reimport didn't help — try OAuth refresh ourselves
+    try {
+      const res = await fetch('https://console.anthropic.com/v1/oauth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          grant_type: 'refresh_token',
+          refresh_token: this.creds!.refreshToken,
+        }),
+      })
+
+      if (res.ok) {
+        const data = await res.json() as { access_token: string; expires_in: number }
+        this.creds!.accessToken = data.access_token
+        this.creds!.expiresAt = Date.now() + data.expires_in * 1000
+        this.persist()
+        return this.creds!.accessToken
+      }
+    } catch {
+      // refresh endpoint failed — fall through
+    }
+
+    // Nothing worked
+    throw new AuthError('anthropic', 'Token expired. Open Claude Code to refresh it, then run: sq reimport')
   }
 
   async getHeaders(): Promise<Record<string, string>> {

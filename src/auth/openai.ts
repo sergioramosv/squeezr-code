@@ -84,28 +84,36 @@ export class OpenAIAuth {
       return this.creds.accessToken
     }
 
-    const res = await fetch('https://auth.openai.com/oauth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        grant_type: 'refresh_token',
-        client_id: 'app_EMoamEEZ73f0CkXaXp7hrann',
-        refresh_token: this.creds.refreshToken,
-      }),
-    })
-
-    if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
-        throw new AuthError('openai', 'Token revoked or expired. Run: sq login openai')
-      }
-      throw new AuthError('openai', `Token refresh failed: ${res.status} ${res.statusText}`)
+    // Token expired — reimport from Codex CLI first
+    const reimported = await this.reimport()
+    if (reimported && this.creds && Date.now() < this.creds.expiresAt - 60_000) {
+      return this.creds.accessToken
     }
 
-    const data = await res.json() as { access_token: string }
-    this.creds.accessToken = data.access_token
-    this.creds.expiresAt = this.extractExpFromJWT(data.access_token)
-    this.persist()
-    return this.creds.accessToken
+    // Try OAuth refresh
+    try {
+      const res = await fetch('https://auth.openai.com/oauth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          grant_type: 'refresh_token',
+          client_id: 'app_EMoamEEZ73f0CkXaXp7hrann',
+          refresh_token: this.creds!.refreshToken,
+        }),
+      })
+
+      if (!res.ok) throw new Error(`${res.status}`)
+
+      const data = await res.json() as { access_token: string }
+      this.creds!.accessToken = data.access_token
+      this.creds!.expiresAt = this.extractExpFromJWT(data.access_token)
+      this.persist()
+      return this.creds!.accessToken
+    } catch {
+      // fall through
+    }
+
+    throw new AuthError('openai', 'Token expired. Open Codex to refresh it, then run: sq reimport')
   }
 
   async getHeaders(): Promise<Record<string, string>> {

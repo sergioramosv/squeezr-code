@@ -74,29 +74,37 @@ export class GoogleAuth {
       return this.creds.accessToken
     }
 
-    const res = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: GOOGLE_CLIENT_ID,
-        client_secret: GOOGLE_CLIENT_SECRET,
-        refresh_token: this.creds.refreshToken,
-      }),
-    })
-
-    if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
-        throw new AuthError('google', 'Token revoked or expired. Run: sq login google')
-      }
-      throw new AuthError('google', `Token refresh failed: ${res.status} ${res.statusText}`)
+    // Token expired — reimport from Gemini CLI first
+    const reimported = await this.reimport()
+    if (reimported && this.creds && Date.now() < this.creds.expiresAt - 60_000) {
+      return this.creds.accessToken
     }
 
-    const data = await res.json() as { access_token: string; expires_in: number }
-    this.creds.accessToken = data.access_token
-    this.creds.expiresAt = Date.now() + data.expires_in * 1000
-    this.persist()
-    return this.creds.accessToken
+    // Try OAuth refresh
+    try {
+      const res = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          client_id: GOOGLE_CLIENT_ID,
+          client_secret: GOOGLE_CLIENT_SECRET,
+          refresh_token: this.creds!.refreshToken,
+        }),
+      })
+
+      if (!res.ok) throw new Error(`${res.status}`)
+
+      const data = await res.json() as { access_token: string; expires_in: number }
+      this.creds!.accessToken = data.access_token
+      this.creds!.expiresAt = Date.now() + data.expires_in * 1000
+      this.persist()
+      return this.creds!.accessToken
+    } catch {
+      // fall through
+    }
+
+    throw new AuthError('google', 'Token expired. Open Gemini CLI to refresh it, then run: sq reimport')
   }
 
   async getHeaders(): Promise<Record<string, string>> {
