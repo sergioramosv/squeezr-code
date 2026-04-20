@@ -1,8 +1,16 @@
 node_modules/
 dist/
+coverage/
 *.js.map
 *.d.ts
 !bin/sq.js
 .env
 .DS_Store
 Thumbs.db
+
+# OAuth public-client credentials — flagged by GitHub Push Protection (GOCSPX- prefix).
+# Kept out of git but included in the npm tarball via .npmignore so `sq login`
+# works out-of-the-box for users who install via `npm i -g squeezr-code`.
+src/auth/oauth-clients.ts
+src/auth/oauth-clients.js
+src/auth/oauth-clients.d.ts

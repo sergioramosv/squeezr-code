@@ -37,6 +37,13 @@ export class AuthManager {
     }
   }
 
+  isOAuth(provider: Provider): boolean {
+    switch (provider) {
+      case 'anthropic': return this.anthropic.isOAuthToken()
+      default: return false
+    }
+  }
+
   async reimport(provider?: Provider): Promise<ReimportResult> {
     if (provider) {
       const result: ReimportResult = { anthropic: false, openai: false, google: false }
@@ -61,6 +68,40 @@ export class AuthManager {
     if (this.openai.isAuthenticated()) providers.push('openai')
     if (this.google.isAuthenticated()) providers.push('google')
     return providers
+  }
+
+  /** Lanza el OAuth flow del provider indicado. Bloquea hasta completarlo. */
+  async login(provider: Provider): Promise<void> {
+    switch (provider) {
+      case 'anthropic': return this.anthropic.login()
+      case 'openai':    return this.openai.login()
+      case 'google':    return this.google.login()
+    }
+  }
+
+  /** ms hasta que expira el token del provider, o null si no hay creds. */
+  msUntilExpiry(provider: Provider): number | null {
+    switch (provider) {
+      case 'anthropic': return this.anthropic.msUntilExpiry()
+      case 'openai':    return this.openai.msUntilExpiry()
+      case 'google':    return this.google.msUntilExpiry()
+    }
+  }
+
+  /**
+   * Refresca proactivamente todos los tokens que expiren en menos de `bufferMs`.
+   * Llamado por el background timer. Silencioso si falla — el siguiente request
+   * intentará refresh de nuevo y, si también falla, saltará el flow inline.
+   */
+  async refreshIfNeeded(bufferMs: number): Promise<void> {
+    const providers = this.authenticated()
+    await Promise.allSettled(providers.map(async (p) => {
+      const ms = this.msUntilExpiry(p)
+      if (ms === null) return
+      if (ms > bufferMs) return
+      // ensureValid hace refresh transparente vía /token
+      try { await this.headersFor(p) } catch { /* silencioso */ }
+    }))
   }
 
   getOpenAIAccountId(): string | null {

@@ -1,0 +1,29 @@
+# When this file exists, npm uses it INSTEAD of .gitignore for packaging.
+#
+# The only reason we need it is so that `src/auth/oauth-clients.ts` (which
+# IS git-ignored — see .gitignore) still makes it into the npm tarball.
+# Without this file, npm falls back to .gitignore and would exclude it too,
+# breaking `sq login` for users who install via `npm i -g squeezr-code`.
+#
+# Keep this list mirroring .gitignore minus the oauth-clients entries.
+
+node_modules/
+coverage/
+
+# Build output location — uncomment if the publish flow does NOT run tsc first.
+# dist/
+
+# Dev-only stuff.
+.git/
+.github/
+.vscode/
+.idea/
+*.log
+.env
+.env.*
+.DS_Store
+Thumbs.db
+
+# Never ship editor / CI dotfiles.
+.eslintcache
+.turbo/

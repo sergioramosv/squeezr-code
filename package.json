@@ -1,6 +1,6 @@
 {
   "name": "squeezr-code",
-  "version": "0.1.0",
+  "version": "0.84.46",
   "description": "The intelligent CLI that never loses context",
   "type": "module",
   "bin": {
@@ -11,12 +11,20 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node bin/sq.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "@types/react": "^19.2.14",
+    "ink": "^7.0.1",
+    "ink-text-input": "^6.0.0",
+    "pdf-parse": "^2.4.5",
+    "react": "^19.2.5",
     "smol-toml": "^1.3.1"
   },
   "peerDependencies": {
@@ -44,7 +52,10 @@
     "url": "https://github.com/sergioramosv/squeezr-code.git"
   },
   "devDependencies": {
+    "@types/ink-text-input": "^2.0.5",
     "@types/node": "^25.6.0",
-    "typescript": "^6.0.2"
+    "@vitest/coverage-v8": "^4.1.4",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.4"
   }
 }

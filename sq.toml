@@ -1,6 +1,9 @@
 # ─── Modelo por defecto ───────────────────────────────────────
+# Acepta tanto un ID completo (claude-sonnet-4-6, gpt-5.4) como un alias
+# dinámico: "sonnet" / "opus" / "haiku" apuntan siempre al más reciente
+# de cada familia según lo que reporte /v1/models.
 [agent]
-default = "claude-sonnet-4-20250514"
+default = "sonnet"
 permissions = "default"                 # default | auto | yolo
 
 # ─── Brain: transplante de contexto ──────────────────────────

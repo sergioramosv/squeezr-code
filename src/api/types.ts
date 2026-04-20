@@ -3,13 +3,16 @@ import type { Provider } from '../errors.js'
 export type { Provider }
 
 export interface ContentBlock {
-  type: 'text' | 'tool_use' | 'tool_result'
+  type: 'text' | 'tool_use' | 'tool_result' | 'image'
   text?: string
   id?: string
   name?: string
   input?: Record<string, unknown>
   tool_use_id?: string
   content?: string
+  /** Para bloques `image`: base64 data + mime (image/png, image/jpeg, ...). */
+  imageBase64?: string
+  imageMediaType?: string
 }
 
 export interface NormalizedMessage {
@@ -26,10 +29,33 @@ export interface NormalizedRequest {
   tools: ToolDef[]
   model: string
   stream: boolean
+  /** Budget de extended thinking en tokens. 0 = deshabilitado. Solo Anthropic. */
+  thinkingBudget?: number
+}
+
+export interface SubscriptionUsage {
+  /** Provider al que pertenece este snapshot. */
+  provider: Provider
+  /** % de la ventana de 5h ya consumido (0–1). */
+  fiveHour: number
+  /** Timestamp unix (ms) en el que resetea la ventana de 5h. */
+  fiveHourResetAt: number
+  /** % del límite semanal (0–1). */
+  sevenDay: number
+  /** % del límite semanal específico de Sonnet (0–1), solo aplica a Anthropic. */
+  sevenDaySonnet: number
+  /** Timestamp unix (ms) del reset semanal. */
+  sevenDayResetAt: number
+  /** allowed | warning | limited | ... (tal cual lo devuelve el proveedor). */
+  status: string
+  /** Qué límite es el dominante ahora mismo. */
+  representative: string
+  /** Tipo de suscripción (max, plus, pro, ...). Solo informativo. */
+  plan?: string
 }
 
 export interface NormalizedStreamChunk {
-  type: 'text' | 'tool_use' | 'usage' | 'done'
+  type: 'text' | 'thinking' | 'tool_use' | 'usage' | 'subscription' | 'done'
   text?: string
   id?: string
   name?: string
@@ -39,6 +65,7 @@ export interface NormalizedStreamChunk {
     outputTokens: number
     cacheRead?: number
   }
+  subscription?: SubscriptionUsage
 }
 
 export interface ToolDef {
@@ -57,22 +84,28 @@ export interface APIAdapter {
 export interface AgentEvent {
   type:
     | 'text'
+    | 'thinking'
     | 'tool_start'
     | 'tool_result'
     | 'cost'
+    | 'subscription'
     | 'error'
     | 'done'
     | 'api_call_start'
     | 'transplant'
+    | 'recap'
   timestamp: number
   text?: string
   tool?: { name: string; input?: unknown; result?: string }
-  usage?: { inputTokens: number; outputTokens: number }
+  usage?: { inputTokens: number; outputTokens: number; cacheRead?: number }
   cost?: { usd: number; model: string }
+  subscription?: SubscriptionUsage
   error?: string
   model?: string
   contextPercent?: number
   isError?: boolean
+  /** Para `recap`: tiempo total del turno en segundos. */
+  elapsedSec?: number
 }
 
 export interface AgentLoopOpts {
@@ -81,7 +114,7 @@ export interface AgentLoopOpts {
   cwd: string
   systemPrompt?: string
   appendSystemPrompt?: string
-  permissions: 'default' | 'auto' | 'yolo'
+  permissions: 'default' | 'accept-edits' | 'plan' | 'bypass' | 'auto' | 'yolo'
   messages?: NormalizedMessage[]
   proxyPort?: number
 }

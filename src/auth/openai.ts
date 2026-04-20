@@ -2,6 +2,22 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { AuthError } from '../errors.js'
+import { runOAuthFlow } from './oauth-flow.js'
+
+// Public OAuth client de Codex CLI. Mismo client_id que usa el binario codex.
+// Valor por defecto en oauth-clients.ts (fuera de git) + env-var fallback.
+async function resolveOpenAIClientId(): Promise<string> {
+  if (process.env.SQ_OPENAI_CLIENT_ID) return process.env.SQ_OPENAI_CLIENT_ID
+  try {
+    const mod = await import('./oauth-clients.js')
+    if (mod.OPENAI_CLIENT_ID) return mod.OPENAI_CLIENT_ID
+  } catch { /* file not present */ }
+  throw new AuthError(
+    'openai',
+    'OAuth client_id missing. Set SQ_OPENAI_CLIENT_ID, or install via npm (`npm i -g squeezr-code`) which ships the defaults.',
+  )
+}
+const OPENAI_CLIENT_ID_PROMISE = resolveOpenAIClientId()
 
 export interface OpenAICredentials {
   accessToken: string
@@ -45,6 +61,55 @@ export class OpenAIAuth {
     }
 
     return false
+  }
+
+  /**
+   * OAuth flow completo desde sq (igual que `codex login`, sin Codex CLI instalado).
+   * Devuelve un JWT que vale para WebSocket a chatgpt.com/backend-api/codex/responses.
+   */
+  async login(): Promise<void> {
+    // Codex CLI tiene redirect FIJO en localhost:1455/auth/callback. El client
+    // OAuth de Codex solo acepta exactamente esa URI; con puerto/path distintos
+    // auth.openai.com responde "unknown_error".
+    const openaiClientId = await OPENAI_CLIENT_ID_PROMISE
+    const result = await runOAuthFlow({
+      providerLabel: 'OpenAI / ChatGPT',
+      clientId: openaiClientId,
+      authorizeUrl: 'https://auth.openai.com/oauth/authorize',
+      tokenUrl: 'https://auth.openai.com/oauth/token',
+      scope: 'openid profile email offline_access',
+      port: 1455,
+      redirectPath: '/auth/callback',
+    })
+    if (!result.refreshToken) {
+      throw new AuthError('openai', 'OAuth no devolvió refresh_token (¿offline_access denegado?)')
+    }
+    // accountId viene en el JWT (claim `https://api.openai.com/auth.chatgpt_account_id`)
+    const accountId = this.extractAccountIdFromJWT(result.accessToken)
+    if (!accountId) {
+      throw new AuthError('openai', 'JWT sin chatgpt-account-id (¿cuenta sin ChatGPT Plus/Pro?)')
+    }
+    this.creds = {
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      idToken: result.idToken || '',
+      accountId,
+      expiresAt: this.extractExpFromJWT(result.accessToken),
+      importedFrom: 'sq login openai',
+    }
+    this.persist()
+  }
+
+  private extractAccountIdFromJWT(jwt: string): string | null {
+    try {
+      const payload = JSON.parse(Buffer.from(jwt.split('.')[1], 'base64url').toString())
+      // El claim oficial está namespaced.
+      const auth = payload['https://api.openai.com/auth'] as Record<string, unknown> | undefined
+      const id = auth?.chatgpt_account_id || payload.chatgpt_account_id
+      return typeof id === 'string' ? id : null
+    } catch {
+      return null
+    }
   }
 
   async reimport(): Promise<boolean> {
@@ -97,7 +162,7 @@ export class OpenAIAuth {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           grant_type: 'refresh_token',
-          client_id: 'app_EMoamEEZ73f0CkXaXp7hrann',
+          client_id: await OPENAI_CLIENT_ID_PROMISE,
           refresh_token: this.creds!.refreshToken,
         }),
       })
@@ -113,7 +178,13 @@ export class OpenAIAuth {
       // fall through
     }
 
-    throw new AuthError('openai', 'Token expired. Open Codex to refresh it, then run: sq reimport')
+    throw new AuthError('openai', 'Token expirado y refresh falló. Ejecuta /login openai en sq para reautenticar.')
+  }
+
+  /** ms hasta que expira el token actual (negativo si ya expiró). null si no hay creds. */
+  msUntilExpiry(): number | null {
+    if (!this.creds) return null
+    return this.creds.expiresAt - Date.now()
   }
 
   async getHeaders(): Promise<Record<string, string>> {

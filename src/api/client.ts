@@ -1,4 +1,6 @@
 import { AnthropicAdapter } from './anthropic.js'
+import { OpenAIAdapter } from './openai.js'
+import { GoogleAdapter } from './google.js'
 import type { APIAdapter, Provider } from './types.js'
 import type { AuthManager } from '../auth/manager.js'
 
@@ -21,14 +23,20 @@ export class APIClient {
         adapter = new AnthropicAdapter(
           this.proxyPort,
           () => this.auth.headersFor('anthropic'),
+          () => this.auth.isOAuth('anthropic'),
         )
         break
       case 'openai':
-        // TODO: Phase 1 week 5-6 — OpenAI WebSocket adapter
-        throw new Error('OpenAI adapter not yet implemented')
+        adapter = new OpenAIAdapter(
+          () => this.auth.headersFor('openai'),
+          () => this.auth.getOpenAIAccountId(),
+        )
+        break
       case 'google':
-        // TODO: Phase 1 week 5-6 — Google REST adapter
-        throw new Error('Google adapter not yet implemented')
+        adapter = new GoogleAdapter(
+          () => this.auth.headersFor('google'),
+        )
+        break
     }
 
     this.adapters.set(provider, adapter)
@@ -39,7 +47,9 @@ export class APIClient {
     if (model.startsWith('claude-') || model.includes('haiku') || model.includes('sonnet') || model.includes('opus')) {
       return 'anthropic'
     }
-    if (model.startsWith('o3') || model.startsWith('o4') || model.startsWith('gpt-')) {
+    // gpt-5.4, gpt-5.4-mini, gpt-5-codex, o3, o4-mini, ...
+    if (model.startsWith('gpt-') || model.startsWith('o3') || model.startsWith('o4') ||
+        /^\d/.test(model) /* alias sin prefijo: 5.4-mini, 5-codex, etc. */) {
       return 'openai'
     }
     if (model.startsWith('gemini-')) {

@@ -1,4 +1,5 @@
 import { calculateContextPercent } from './context.js'
+import type { SubscriptionUsage, Provider } from '../api/types.js'
 
 export interface BrainState {
   totalInputTokens: number
@@ -6,6 +7,8 @@ export interface BrainState {
   model: string
   contextPercent: number
   turnCount: number
+  /** Último snapshot del uso de suscripción, uno por provider. */
+  subscriptions: Record<Provider, SubscriptionUsage | null>
 }
 
 export class Brain {
@@ -18,15 +21,24 @@ export class Brain {
       model,
       contextPercent: 0,
       turnCount: 0,
+      subscriptions: { anthropic: null, openai: null, google: null },
     }
   }
 
+  setSubscription(usage: SubscriptionUsage): void {
+    this.state.subscriptions[usage.provider] = usage
+  }
+
   addUsage(inputTokens: number, outputTokens: number): void {
+    // Totales acumulados sirven para coste y estadísticas.
     this.state.totalInputTokens += inputTokens
     this.state.totalOutputTokens += outputTokens
     this.state.turnCount++
+    // Ocupación real de la ventana = tamaño del último turno.
+    // Anthropic ya incluye todo el historial en input_tokens de cada request,
+    // así que sumarlo turno a turno duplicaría el historial N veces.
     this.state.contextPercent = calculateContextPercent(
-      this.state.totalInputTokens + this.state.totalOutputTokens,
+      inputTokens + outputTokens,
       this.state.model,
     )
   }
