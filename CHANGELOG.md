@@ -6,6 +6,38 @@ versionado según [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Scroll del terminal roto en el Ink REPL:** con la rueda del ratón no se
+  podía scrollear mensajes largos. Causa raíz: todo el historial se
+  renderizaba dentro de componentes Ink normales, que React repinta en cada
+  update (cada token de streaming, cada cambio de estado) — el terminal no
+  puede mantener scrollback estable sobre un área que no para de repintarse.
+  **Fix:** el historial de mensajes se envuelve en el componente `<Static>`
+  de Ink. Cada línea completa se emite al stdout **una sola vez** y no se
+  repinta jamás, así el scrollback nativo del terminal la retiene y la
+  rueda del ratón / Shift+PgUp-PgDn funcionan. Sólo el "área viva"
+  (tokens en streaming, spinner, pickers, status bar, input) permanece
+  dentro del render dinámico. Los tokens que aún no han llegado a `\n` se
+  muestran como `liveText` en el área dinámica, así se sigue viendo el
+  flujo de escritura de la IA en tiempo real.
+- **Paginador interno Ctrl+U/D retirado:** ya no hace falta ahora que el
+  terminal gestiona el scrollback. Las teclas se consumen para no ensuciar
+  el input, pero no tienen efecto. Help overlay actualizado.
+- **Context % rebasaba 100%** (p.ej. "102%") cuando Anthropic reportaba
+  burst allowance por encima del soft-limit o cuando el modelo era un
+  Sonnet 4.5/4.6 (1M context) y la tabla interna asumía 200K. Tabla de
+  modelos extendida + pattern match para `claude-sonnet-4-[5-9]-*` → 1M.
+  Además, todos los renders del % cap a 100 con sufijo `!` para señalar
+  "estás al tope" sin mentir con un número imposible.
+- **Secrets en el repo:** client IDs de OAuth (Anthropic, OpenAI, Google)
+  y el client_secret `GOCSPX-*` de Gemini CLI vivían hardcoded en
+  `src/auth/*.ts`, disparando GitHub Push Protection. Movidos a
+  `src/auth/oauth-clients.ts` (git-ignored, pero incluido en el tarball
+  de npm vía `.npmignore` — `sq login` sigue funcionando out-of-the-box
+  después de `npm i -g`). Fixtures del test de redacción (`redact.test.ts`)
+  tokenizados con `tok('xo', 'xb-')` para no dejar literales que el
+  scanner de GitHub flaggee, sin perder la validez del test.
+
 ### Próximo
 - **Auto-routing** inteligente por clasificación del prompt.
 - **Integración real con `squeezr-ai`** (compresión de contexto vía proxy).

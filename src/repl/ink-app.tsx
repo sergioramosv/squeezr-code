@@ -24,7 +24,7 @@
  */
 
 import React, { useState, useCallback, useRef, useEffect } from 'react'
-import { Box, Text, useInput, useStdout } from 'ink'
+import { Box, Static, Text, useInput, useStdout } from 'ink'
 import type { SqAgent } from '../agent/agent.js'
 import type { SqConfig } from '../config.js'
 import { cycleMode, type Mode } from './mode.js'
@@ -341,6 +341,11 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
 
   // ── State ───────────────────────────────────────────────────────────────────
   const [lines, setLines] = useState<OutputLine[]>([])
+  // Token buffer currently being streamed — lives OUTSIDE the Static block so
+  // the rest of the scrollback isn't repainted on every keystroke. When a `\n`
+  // is flushed, the completed text is pushed into `lines` (Static) and this
+  // clears.
+  const [liveText, setLiveText] = useState('')
   const [input, setInput] = useState('')
   const [isProcessing, setIsProcessing] = useState(false)
   const [pendingQueue, setPendingQueue] = useState<string[]>([])
@@ -497,10 +502,14 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
     let currentTextBuffer = ''
 
     function flushText() {
-      if (!currentTextBuffer) return
+      if (!currentTextBuffer) {
+        setLiveText('')
+        return
+      }
       const textLines = makeBodyLines('agent_body', currentTextBuffer)
       setLines(prev => [...prev, ...textLines])
       currentTextBuffer = ''
+      setLiveText('')
     }
 
     try {
@@ -518,6 +527,11 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
             const complete = parts.flatMap(l => makeBodyLines('agent_body', l))
             setLines(prev => [...prev, ...complete])
             currentTextBuffer = incomplete
+            setLiveText(incomplete)
+          } else {
+            // No newline yet — surface the partial buffer in the live area so
+            // the user sees tokens as they stream, without repainting Static.
+            setLiveText(currentTextBuffer)
           }
         } else if (event.type === 'thinking' && event.text) {
           if (!hasAgentHeader) {
@@ -700,15 +714,13 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
       return
     }
 
-    // PgUp / PgDn — scroll del output (Ctrl+U / Ctrl+D como en vim)
-    if ((key.ctrl && char === 'u') || key.pageUp) {
-      setScrollOffset(o => o + Math.max(4, Math.floor(outputHeightRef.current / 2)))
-      return
-    }
-    if ((key.ctrl && char === 'd') || key.pageDown) {
-      setScrollOffset(o => Math.max(0, o - Math.max(4, Math.floor(outputHeightRef.current / 2))))
-      return
-    }
+    // Scroll is now handled by the terminal's native scrollback (since the
+    // message history lives inside <Static> — see render block). Mouse wheel
+    // and Shift+PgUp/Dn work out of the box. Ctrl+U/D and PgUp/PgDn are
+    // consumed here to prevent them from being typed into the input buffer,
+    // but do nothing else.
+    if ((key.ctrl && char === 'u') || key.pageUp) return
+    if ((key.ctrl && char === 'd') || key.pageDown) return
 
     // ── Permission picker ──────────────────────────────────────────────────────
     if (permissionRequest) {
@@ -1051,28 +1063,42 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
       filteredLines.push(...thinkBuf)
     }
   }
-  // scrollOffset=0 → fondo (live). scrollOffset>0 → scroll hacia arriba.
-  // Cuando llega nuevo output, volver al fondo automáticamente si estábamos en live mode.
-  const totalFiltered = filteredLines.length
-  const clampedOffset = Math.min(scrollOffset, Math.max(0, totalFiltered - outputHeight))
-  const sliceEnd = totalFiltered - clampedOffset
-  const sliceStart = Math.max(0, sliceEnd - outputHeight)
-  const visibleLines = filteredLines.slice(sliceStart, sliceEnd)
-  const isLiveMode = clampedOffset === 0
+  // NOTE: Previous versions did in-app pagination (sliceStart/sliceEnd with
+  // Ctrl+U/D) because Ink was repainting the whole output on every render,
+  // which broke terminal scrollback and therefore mouse-wheel scrolling.
+  // That's now replaced by <Static>: each completed line is emitted to
+  // stdout exactly once and never repainted, so the terminal's own
+  // scrollback retains it and the mouse wheel works. `scrollOffset` and the
+  // Ctrl+U/D handlers are left as no-ops and will be removed once users
+  // adopt the new scroll model.
+  const staticLines = filteredLines
+  // Silence unused-var warnings from the now-decommissioned scroll math.
+  void scrollOffset
+  const isLiveMode = true
 
   const sep = '─'.repeat(cols)
 
   // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <Box flexDirection="column">
-      {/* Output area — sin altura fija: el status+input quedan justo debajo del
-          último mensaje. Ink re-renderiza desde el cursor, no hay líneas vacías.
-          visibleLines.slice(-outputHeight) ya limita cuántas líneas se muestran. */}
+      {/* Completed scrollback — emitted once to stdout, never repainted.
+          This is what lets the terminal's native scroll (mouse wheel,
+          Shift+PgUp/Dn) work on past messages. */}
+      <Static items={staticLines}>
+        {(line: OutputLine) => <OutputLineView key={line.id} line={line} />}
+      </Static>
+
+      {/* Live area — tokens being streamed + spinner. Repaints normally. */}
       <Box flexDirection="column">
-        {visibleLines.map(line => (
-          <OutputLineView key={line.id} line={line} />
-        ))}
-        {isProcessing && (
+        {/* Streaming buffer: tokens received since the last newline, so the
+            user sees them flowing without waiting for a \n to flush. */}
+        {liveText && (
+          <Box>
+            <Text dimColor>│ </Text>
+            <Text>{liveText}</Text>
+          </Box>
+        )}
+        {isProcessing && !liveText && (
           <Box>
             <Text dimColor>│ </Text>
             <Text dimColor color="#c8a050">…</Text>
@@ -1141,7 +1167,7 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
           <Text dimColor>  ─────────────────────────────────────────────────────</Text>
           <Text dimColor>  Misc         </Text><Text>/export  /usage  /env  /release-notes  /exit</Text>
           <Text dimColor>  Login        </Text><Text>/login anthropic  /login openai  /login google</Text>
-          <Text dimColor>  Scroll       Ctrl+U sube · Ctrl+D baja · al enviar vuelve al fondo</Text>
+          <Text dimColor>  Scroll       rueda del ratón · Shift+PgUp/Dn (nativo del terminal)</Text>
           <Text dimColor>  Input        Esc×2 limpiar · Shift+Tab ciclar modo</Text>
           <Text dimColor>  Avanzados    sq --classic  (mcp, sessions, fork, undo…)</Text>
         </Box>
@@ -1162,11 +1188,9 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
         </Box>
       )}
 
-      {/* Top separator — muestra hint de scroll cuando no estamos en live mode */}
-      {isLiveMode
-        ? <Text dimColor>{sep}</Text>
-        : <Text dimColor>{sep.slice(0, sep.length - 28)}  Ctrl+U/D scroll · Ctrl+D to live</Text>
-      }
+      {/* Top separator above the status bar. With <Static> handling the
+          scrollback, we're always "live" — no paginator state to surface. */}
+      <Text dimColor>{sep}</Text>
 
       {/* Status bar */}
       <Box>
