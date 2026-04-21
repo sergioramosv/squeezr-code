@@ -2,6 +2,7 @@ import { APIClient } from '../api/client.js'
 import { AuthManager } from '../auth/manager.js'
 import { Brain } from '../brain/brain.js'
 import { handleAPIError, sleep } from '../api/retry.js'
+import { resolveModelAlias } from '../api/models.js'
 import { SQ_TOOLS } from '../tools/definitions.js'
 import { executeTool } from '../tools/executor.js'
 import { buildSystemPrompt } from './system.js'
@@ -155,9 +156,12 @@ export class SqAgent {
   constructor(auth: AuthManager, config: AgentConfig) {
     this.auth = auth
     this.config = config
-    this.currentModel = config.defaultModel
-    this.currentProvider = this.resolveProvider(config.defaultModel)
-    this.brain = new Brain(config.defaultModel)
+    // Resolve aliases ("sonnet", "opus-4.7", "5-codex") to full provider IDs
+    // up front, so the literal alias never reaches the provider API (→ 404).
+    const resolved = resolveModelAlias(config.defaultModel)
+    this.currentModel = resolved
+    this.currentProvider = this.resolveProvider(resolved)
+    this.brain = new Brain(resolved)
     // No external proxy — direct to APIs
     this.apiClient = new APIClient(auth, null)
   }
@@ -198,7 +202,9 @@ export class SqAgent {
       attachments?: Array<{ base64: string; mediaType: string }>
     },
   ): AsyncGenerator<AgentEvent> {
-    const model = opts?.model || this.currentModel
+    // Per-turn override (`@opus hola`) may arrive as an alias — resolve here
+    // so downstream provider adapters always see a full model ID.
+    const model = opts?.model ? resolveModelAlias(opts.model) : this.currentModel
     const provider = this.resolveProvider(model)
     const cwd = opts?.cwd || process.cwd()
     // Reset del abort flag al empezar el turno.
@@ -708,9 +714,13 @@ Escribe el resumen como si fuera un briefing para retomar el trabajo en una nuev
   }
 
   setModel(model: string): void {
-    this.currentModel = model
-    this.currentProvider = this.resolveProvider(model)
-    this.brain.setModel(model)
+    // Accept aliases from slash commands, the model picker, persisted sessions,
+    // etc. All internal bookkeeping uses the full ID so API requests never
+    // 404 because of a bare "sonnet".
+    const resolved = resolveModelAlias(model)
+    this.currentModel = resolved
+    this.currentProvider = this.resolveProvider(resolved)
+    this.brain.setModel(resolved)
   }
 
   // --- Internal ---

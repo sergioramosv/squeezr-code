@@ -6,7 +6,165 @@ versionado según [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.84.53] - 2026-04-20
+
+### Added
+- **AskUserQuestion picker secuencial en el Ink REPL.** Cuando el agente
+  invoca la tool `AskUserQuestion` se abre un panel inline con la pregunta
+  + opciones, navegable con `↑/↓` (también `j/k`) y `Enter` para confirmar.
+  Cada llamada a la tool = una pregunta; si el agente quiere preguntar
+  varias cosas, hace varias llamadas y se muestran una a una. Al
+  responder, la pareja `? pregunta` / `→ respuesta` se queda en el
+  scrollback como info, así al final tienes el listado de Q+A sin tener
+  que recordarlas. **Multi-select** soportado (Space toggle, Enter
+  confirma lo marcado). Esc cancela. Hotkeys numéricos `1-9` también
+  funcionan. Wire-up vía `setUserQuestioner` (la infra del executor ya
+  estaba; el Ink REPL no la enchufaba — sólo el classic REPL).
+- **System prompt actualizado** para empujar al modelo a usar la tool en
+  vez de soltar listas de preguntas en markdown ("**1. ¿…? 2. ¿…?**").
+
+### Changed
+- **Indentación de 2 espacios en el output del agente.** `agent_header`,
+  `agent_body`, `thinking`, `tool_start`, `diff_*`, `task_item`, `info`,
+  `error`, `turn_end` ahora se rinden con `  ` al inicio para separarlos
+  visualmente del borde izquierdo del terminal y del mensaje del user.
+  Dos espacios es ligero a propósito — más se cuela en la selección con
+  ratón al copiar y molesta al pegar.
+- **Fondo gris del mensaje del user (`user_body` / `user_header`) ocupa
+  toda la fila.** Antes solo cubría el ancho del texto, dejando un bloque
+  visual irregular. Ahora `width="100%"` extiende el `backgroundColor`
+  hasta el borde derecho del terminal, así cada mensaje del usuario es
+  una franja completa fácil de identificar al hacer scroll.
+
+## [0.84.52] - 2026-04-20
+
 ### Fixed
+- **Permission picker del Ink REPL ahora es interactivo (↑↓ + Enter)
+  como Claude Code.** El panel `Allow Bash?` mostraba una lista numerada
+  pasiva (`1 / Y`, `2`, `3`, `N / 4`) y el usuario tenía que **escribir**
+  el número o la letra. Causa: en una iteración previa documenté que el
+  picker interactivo "ya existía" porque `src/repl/permission-picker.ts`
+  está en el repo, pero ese módulo se usa solo en el REPL clásico
+  (`sq --classic`); el Ink REPL tenía su propio panel inline pasivo.
+  Ahora el panel del Ink:
+  - Muestra cursor `❯` en la opción seleccionada y la pinta en verde.
+  - Navegas con `↑/↓` (también `j/k` y `Tab`).
+  - `Enter` confirma la opción resaltada.
+  - `Esc` deniega (denegar = no, y manda explicación al modelo).
+  - Hotkeys numéricos `1/2/3/4` y letra `y/a/n` siguen funcionando para
+    los que prefieren teclear directo.
+  - Las opciones se construyen dinámicamente: si hay `patternSuggestion`
+    aparece la opción de "allow pattern", si no, se omite (y `3` se mapea
+    a deny en su lugar).
+
+## [0.84.51] - 2026-04-20
+
+### Removed
+- **Atajos `Ctrl+Y` y `Ctrl+1..9` para copiar bloques de código.** El
+  pseudo-botón `[ N copy ] Ctrl+N` que aparecía debajo de cada bloque
+  también se va. Razón: el botón no es realmente cliquable (los
+  terminales no soportan clicks sin activar mouse tracking, lo cual
+  rompería la rueda del ratón para scroll), así que tener el botón
+  visual + atajo confundía. Ahora la única vía es la nativa del terminal:
+  selección con el ratón + `Ctrl+C` de tu terminal. Funciona limpio
+  porque desde 0.84.49 el output del agente no tiene gutter `│ ` que
+  se cuele en la selección.
+- **Toast de confirmación de copia** — eliminado junto con los atajos.
+- Helpers `clipboard-write.ts` y `code-blocks.ts` se mantienen en disk
+  por si volvemos a introducir un flujo de copia (slash command, picker)
+  pero ya no se importan en el REPL.
+
+### Kept
+- **Fondo oscuro `#1a1a1a`** en cada línea de bloque de código y
+  **etiqueta de lenguaje** en la barra superior (`typescript · block #1`)
+  — siguen siendo útiles para distinguir visualmente el código.
+- **Cierre del bloque** ahora es una línea vacía simple (no botón).
+
+## [0.84.50] - 2026-04-20
+
+### Added
+- **Bloques de código con fondo oscuro y etiqueta de lenguaje.** Las
+  líneas entre ```` ``` ```` ahora tienen `backgroundColor #1a1a1a` y una
+  barra con el lenguaje arriba (`typescript · block #1`). La indentación
+  del código se preserva exacta (sin wrap por ancho) para que el copy
+  produzca código válido.
+- **Pseudo-botón de copiar por bloque + `Ctrl+1..9`.** Debajo de cada
+  bloque de código aparece una etiqueta verde `[ N copy ] Ctrl+N` que
+  visualmente funciona como botón. Pulsar `Ctrl+N` copia el bloque N al
+  portapapeles. `Ctrl+Y` sigue funcionando y copia el último. **No es
+  clickable con el ratón** y no lo puede ser sin activar mouse tracking
+  en el terminal, lo cual rompería la rueda del ratón para scroll —
+  incompatibilidad del protocolo VT, no de squeezr. El pseudo-botón sirve
+  de recordatorio visual del atajo.
+
+### Fixed
+- **Última frase de cada mensaje aparecía duplicada.** Había un `liveText`
+  state que pintaba el buffer de tokens "en vuelo" en el área dinámica
+  mientras esperaba el siguiente `\n`. Cuando llegaba ese `\n`, el
+  contenido se pasaba a `<Static>` pero el área dinámica ya había
+  imprimido esos bytes al stdout en un render previo — terminales modernos
+  los retenían en scrollback y acababan mostrándose dos veces. Eliminado
+  `liveText`: el streaming se pinta línea a línea al completarse cada
+  `\n`. Trade-off aceptable (un par de cientos de ms de delay al ver cada
+  línea) y desaparece la duplicación.
+- **Texto del agente pegado sin saltos (`SqueezrAhora toca...`).** Al
+  quitar los `│ ` la versión 0.84.49 dejó cada `OutputLineView` como un
+  `<Box>` envoltorio delgado; según cómo Ink serializa al terminal, los
+  Box sin contenido horizontal terminaban sin un break sólido entre
+  items de `<Static>` y algunos terminales colapsaban varias líneas
+  al copiar. Ahora cada tipo simple (`agent_header`, `agent_body`,
+  `thinking`, `tool_start`, `diff_*`, `task_item`, `info`, `error`) se
+  renderiza como `<Text>` directo sin Box — garantiza un break por línea
+  en el flujo de salida. Los Box se conservan solo en los tipos que
+  necesitan `backgroundColor` de verdad (user_body, code lines).
+
+## [0.84.49] - 2026-04-20
+
+### Added
+- **`Ctrl+Y` copia al portapapeles.** Atajo global que coge el último
+  bloque de código markdown (\`\`\`…\`\`\`) del mensaje del agente en curso
+  y lo mete en el clipboard del sistema. Si el mensaje no tiene fenced
+  blocks, copia el texto completo como fallback (nunca es no-op silencioso).
+  Confirmación con toast efímero de 2s bajo el input (`✓ Copied last code
+  block (N lines)` / `✗ Copy failed: …`). Cross-platform via `clip.exe`
+  (Windows), `pbcopy` (macOS) y `wl-copy`/`xclip`/`xsel` (Linux). Nuevo
+  módulo `src/repl/clipboard-write.ts` y parser de fenced blocks en
+  `src/repl/code-blocks.ts`.
+- **Animación "Squeezr pensando".** Mientras la IA está procesando y aún
+  no ha llegado el primer token streameado, se muestra un icono sparkle
+  que titila (`✶ ✦ ✧ ⋆` cada 150ms), un verbo rotativo entre ~20 variantes
+  (`Galloping…`, `Pondering…`, `Musing…`, `Thinking…`, `Brewing…`,
+  `Contemplating…`, `Brainstorming…`, `Conjuring…`, …) que cambia cada 3s
+  eligiendo al azar para no ser cíclica, y el tiempo transcurrido que
+  refresca cada segundo (`(12s)` → `(1m 23s)`). Tras 3s aparece el hint
+  `· esc to cancel`. Todo encapsulado en el componente `<ThinkingLine>`:
+  los tres timers son state local, así que sólo se repinta esta línea, no
+  el scrollback.
+
+### Changed
+- **Gutter `│ ` eliminado del todo.** Los terminales no pueden excluir
+  glifos de la selección del ratón, así que al copiar-pegar el output a
+  otro sitio se arrastraba el prefijo `│ ` en cada línea y había que
+  limpiar a mano. Ahora el user_header/user_body/agent_header/agent_body/
+  thinking se renderizan sin gutter. Copy-paste manual sale limpio. Para
+  distinguir turnos visualmente, el fondo gris claro del `user_body` se
+  mantiene, y el header del agente sigue con `Squeezr` en verde.
+
+## [0.84.48] - 2026-04-20
+
+### Fixed
+- **404 "model: sonnet" al arrancar con el default:** el valor por defecto
+  de `agent.default` en la config es el alias `"sonnet"`, pero el `Agent`
+  lo guardaba literal en `currentModel` y lo enviaba así a la API, que
+  respondía `not_found_error / model: sonnet`. Causa: la función
+  `resolveModelAlias` (en `repl/model-picker.ts`) sólo se llamaba desde el
+  override `@alias` del REPL; el agent nunca la tocaba. **Fix:** movida a
+  `src/api/models.ts` (evita dependencia `agent → repl`) y enchufada en
+  los tres puntos de entrada del Agent — constructor, `setModel()` y
+  `send({ model })`. Añadido además `FAMILY_ID_FALLBACK` con IDs
+  hardcodeados para `sonnet/opus/haiku/pro/flash` para cuando
+  `loadModels` falla silenciosamente (sin red, no autenticado, etc.), así
+  el alias nunca llega crudo a la API.
 - **Scroll del terminal roto en el Ink REPL:** con la rueda del ratón no se
   podía scrollear mensajes largos. Causa raíz: todo el historial se
   renderizaba dentro de componentes Ink normales, que React repinta en cada

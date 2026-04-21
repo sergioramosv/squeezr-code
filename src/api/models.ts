@@ -307,6 +307,57 @@ export function getLoadedModels(): ModelInfo[] {
 }
 
 /**
+ * Hardcoded fallbacks used when `loadModels()` hasn't finished or the
+ * remote catalogue is empty (no network, login missing, etc.). Without
+ * these, a fresh install booting with `defaultModel: 'sonnet'` would
+ * send the literal alias to the API and get a 404.
+ * Kept intentionally small — only the families the config's `default`
+ * may contain.
+ */
+const FAMILY_ID_FALLBACK: Record<string, string> = {
+  sonnet: 'claude-sonnet-4-5-20250929',
+  opus:   'claude-opus-4-6-20260301',
+  haiku:  'claude-haiku-4-5-20251001',
+  pro:    'gemini-2.5-pro',
+  flash:  'gemini-2.5-flash',
+}
+
+/**
+ * Resolve any user-visible model reference (full ID, derived alias, or
+ * family shortcut) to the full provider model ID used in API calls.
+ *
+ * Examples:
+ *   "sonnet"                    → "claude-sonnet-4-5-20250929"
+ *   "opus-4.7"                  → "claude-opus-4-7-20260401"
+ *   "claude-sonnet-4-5-...."    → same (pass-through)
+ *   "5-codex"                   → "gpt-5-codex"  (catalogue or digit-start fallback)
+ *
+ * If nothing matches AND the input is a family shortcut with a hardcoded
+ * fallback, use that. Otherwise return the input unchanged (API will
+ * produce a clear 404 instead of a silent misroute).
+ */
+export function resolveModelAlias(input: string): string {
+  if (!input) return input
+  const models = getLoadedModels()
+  // 1. Exact ID match
+  const byId = models.find(m => m.id === input)
+  if (byId) return byId.id
+  // 2. Alias match (opus-4.7, sonnet-4.6, 5.4-mini, …)
+  const byAlias = models.find(m => m.alias === input)
+  if (byAlias) return byAlias.id
+  // 3. Family shortcut (opus / sonnet / haiku / pro / flash)
+  const fam = resolveFamilyShortcut(input, models)
+  if (fam) return fam
+  // 4. Hardcoded family fallback (loadModels didn't finish / empty registry)
+  const fb = FAMILY_ID_FALLBACK[input.toLowerCase()]
+  if (fb) return fb
+  // 5. Digit-start alias → assume Codex family ("5-codex" → "gpt-5-codex")
+  if (/^\d/.test(input)) return `gpt-${input}`
+  // 6. Pass-through — lets full IDs we don't know about still reach the API.
+  return input
+}
+
+/**
  * Alias reservados:
  *   opus / sonnet / haiku → último de cada familia Anthropic
  *   pro / flash           → último de cada familia Google

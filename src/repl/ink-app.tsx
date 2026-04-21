@@ -34,6 +34,11 @@ import { isAllowedBySession, allowToolForSession, allowPatternForSession, sugges
 import { classifyPromptForRouter } from './repl.js'
 import { resolveModelAlias, getAliasKeys } from './model-picker.js'
 import { type CustomCommand, expandCustomCommand } from './custom-commands.js'
+import { setUserQuestioner } from '../tools/executor.js'
+// clipboard-write and code-blocks are intentionally NOT imported here —
+// the Ctrl+Y / Ctrl+N copy shortcuts were removed in 0.84.51 in favour of
+// terminal-native mouse selection + Ctrl+C. The helpers stay on disk in
+// case we want to reintroduce a copy flow later (e.g. via a slash command).
 
 /** Modelos curados para el picker de /model */
 const CURATED_MODELS = [
@@ -77,6 +82,9 @@ export type OutputLineKind =
   | 'user_body'
   | 'agent_header'
   | 'agent_body'
+  | 'agent_code_fence_open'   // the ```lang opening line — renders as a header strip
+  | 'agent_code'              // a line inside a fenced block — dark bg, preserves indent
+  | 'agent_code_fence_close'  // the closing ``` — renders the "[ N copy ] Ctrl+N" pseudo-button
   | 'tool_start'
   | 'diff_remove'
   | 'diff_add'
@@ -90,6 +98,11 @@ export interface OutputLine {
   id: number
   kind: OutputLineKind
   text: string
+  /** Language label shown on fence_open (e.g. "typescript", "bash"). */
+  lang?: string
+  /** 1-based index of the code block within the current agent message.
+   *  Used by the Ctrl+N shortcut and by the rendered pseudo-button. */
+  blockIndex?: number
 }
 
 export interface AppProps {
@@ -110,8 +123,52 @@ function nextId(): number {
   return ++lineIdCounter
 }
 
-function makeLine(kind: OutputLineKind, text: string): OutputLine {
-  return { id: nextId(), kind, text }
+function makeLine(
+  kind: OutputLineKind,
+  text: string,
+  extras?: { lang?: string; blockIndex?: number },
+): OutputLine {
+  return { id: nextId(), kind, text, ...extras }
+}
+
+// ── Permission picker option model ──────────────────────────────────
+type PermissionOptionId = 'once' | 'session' | 'pattern' | 'deny'
+interface PermissionOption {
+  id: PermissionOptionId
+  label: string
+  hint?: string
+  danger?: boolean
+}
+function buildPermissionOptions(req: PermissionRequest): PermissionOption[] {
+  const opts: PermissionOption[] = [
+    { id: 'once', label: 'Yes', hint: 'allow just this call' },
+    {
+      id: 'session',
+      label: `Yes, and don't ask again for ${req.toolName} this session`,
+      hint: 'until sq closes',
+    },
+  ]
+  if (req.patternSuggestion) {
+    opts.push({
+      id: 'pattern',
+      label: `Yes, and don't ask again for ${req.toolName} matching ${req.patternSuggestion}`,
+      hint: 'pattern match only',
+    })
+  }
+  opts.push({
+    id: 'deny',
+    label: 'No, and tell the model what to do instead',
+    hint: 'denies + sends explanation',
+    danger: true,
+  })
+  return opts
+}
+
+/** Match a ```lang or closing ``` fence line. Whitespace tolerated either side. */
+function matchCodeFence(line: string): { lang: string | null } | null {
+  const m = /^\s*```\s*([^\s`]*)\s*$/.exec(line)
+  if (!m) return null
+  return { lang: m[1] || null }
 }
 
 /**
@@ -252,83 +309,130 @@ const MODE_COLORS: Record<Mode, string> = {
 
 // ─── Line renderer component ─────────────────────────────────────────────────
 
+// ── "Squeezr pensando" animation ─────────────────────────────────────
+// Shown in the dynamic area while the agent is busy. Three rotating parts:
+//   - a sparkle icon that twinkles every 150ms
+//   - a thinking verb that cycles every 3s (so it feels alive but not
+//     epileptic)
+//   - an elapsed-seconds counter that refreshes every 1s
+// All three are local state/timers — they only repaint this tiny Box,
+// not the scrollback (which is in <Static>).
+const THINKING_VERBS = [
+  'Galloping', 'Pondering', 'Musing', 'Thinking', 'Brewing', 'Contemplating',
+  'Brainstorming', 'Conjuring', 'Plotting', 'Scheming', 'Hatching', 'Cooking',
+  'Sizzling', 'Unraveling', 'Untangling', 'Scribbling', 'Deliberating',
+  'Weaving', 'Ruminating', 'Pondering', 'Percolating',
+]
+const SPARKLE_FRAMES = ['✶', '✦', '✧', '⋆']
+
+function ThinkingLine(): React.ReactElement {
+  const [frame, setFrame] = useState(0)
+  const [verbIdx, setVerbIdx] = useState(() => Math.floor(Math.random() * THINKING_VERBS.length))
+  const [elapsed, setElapsed] = useState(0)
+  const startRef = useRef(Date.now())
+
+  useEffect(() => {
+    startRef.current = Date.now()
+    const frameTimer = setInterval(() => setFrame(f => (f + 1) % SPARKLE_FRAMES.length), 150)
+    const verbTimer = setInterval(
+      () => setVerbIdx(v => (v + 1 + Math.floor(Math.random() * 2)) % THINKING_VERBS.length),
+      3000,
+    )
+    const elapsedTimer = setInterval(
+      () => setElapsed(Math.floor((Date.now() - startRef.current) / 1000)),
+      1000,
+    )
+    return () => {
+      clearInterval(frameTimer)
+      clearInterval(verbTimer)
+      clearInterval(elapsedTimer)
+    }
+  }, [])
+
+  const m = Math.floor(elapsed / 60)
+  const s = elapsed % 60
+  const elapsedText = m > 0 ? `${m}m ${s}s` : `${s}s`
+
+  return (
+    <Box>
+      <Text color="#c8a050">{SPARKLE_FRAMES[frame]} </Text>
+      <Text color="#c8a050">{THINKING_VERBS[verbIdx]}… </Text>
+      <Text dimColor>({elapsedText}{elapsed > 3 ? ' · esc to cancel' : ''})</Text>
+    </Box>
+  )
+}
+
 function OutputLineView({ line }: { line: OutputLine }): React.ReactElement {
   switch (line.kind) {
+    // NOTE: the "│ " left gutter that previously prefixed every turn has
+    // been removed. It was visually distinctive but terminals don't let
+    // glyphs be excluded from mouse selection, so copy-pasting the output
+    // always dragged the gutter along with the code. Users now get a
+    // clean selection and Ctrl+Y covers the "copy last block" path.
+    //
+    // Style note: returning a bare <Text> (rather than <Box><Text/></Box>)
+    // guarantees Ink terminates the line with a proper break in the TTY
+    // output, so subsequent items don't end up rendered on the same row
+    // when terminals copy-paste sequences across escape codes. Box wrappers
+    // are kept only where a backgroundColor is needed.
     case 'user_header':
+      // width="100%" makes the gray background span the entire row, not
+      // just the width of the "you" text. Same for user_body below.
       return (
-        <Box backgroundColor="#303030">
-          <Text dimColor>│ </Text>
-          <Text dimColor>you</Text>
+        <Box backgroundColor="#303030" width="100%">
+          <Text dimColor>  you</Text>
         </Box>
       )
     case 'user_body':
       return (
-        <Box backgroundColor="#303030">
-          <Text dimColor>│ </Text>
-          <Text color="white">{line.text}</Text>
+        <Box backgroundColor="#303030" width="100%">
+          <Text color="white">  {line.text}</Text>
         </Box>
       )
+    // Agent text gets a 2-space indent so it visually offsets from the
+    // user message and from the left edge. Two spaces is intentionally
+    // light — anything more than that gets pulled along on mouse-select
+    // copy and starts to annoy when pasted to other tools.
     case 'agent_header':
-      return (
-        <Box>
-          <Text dimColor>│ </Text>
-          <Text color="#6aaa6a">Squeezr</Text>
-        </Box>
-      )
+      return <Text color="#6aaa6a" bold>  Squeezr</Text>
     case 'agent_body':
+      return <Text>  {line.text}</Text>
+    case 'agent_code_fence_open': {
+      const lang = line.lang?.trim() || 'code'
+      const n = line.blockIndex ?? 0
       return (
-        <Box>
-          <Text dimColor>│ </Text>
-          <Text>{line.text}</Text>
+        <Box backgroundColor="#1a1a1a">
+          <Text color="#7a9ec2" bold> {lang} </Text>
+          <Text dimColor> · block #{n}</Text>
         </Box>
       )
+    }
+    case 'agent_code':
+      return (
+        <Box backgroundColor="#1a1a1a">
+          <Text color="#e0e0e0">  {line.text}</Text>
+        </Box>
+      )
+    case 'agent_code_fence_close':
+      // Closing fence renders as a thin spacer so there's a visual end to
+      // the dark code-block area before regular prose continues.
+      return <Text dimColor> </Text>
     case 'thinking':
-      return (
-        <Box>
-          <Text dimColor>│ </Text>
-          <Text dimColor color="#7a9ec2">{line.text}</Text>
-        </Box>
-      )
+      return <Text dimColor color="#7a9ec2">  {line.text}</Text>
     case 'tool_start':
-      return (
-        <Box>
-          <Text color="#7a9ec2">{line.text}</Text>
-        </Box>
-      )
+      return <Text color="#7a9ec2">  {line.text}</Text>
     case 'diff_remove':
-      return (
-        <Box>
-          <Text backgroundColor="#5c0000" color="white">{line.text}</Text>
-        </Box>
-      )
+      return <Text backgroundColor="#5c0000" color="white">  {line.text}</Text>
     case 'diff_add':
-      return (
-        <Box>
-          <Text backgroundColor="#1a4a1a" color="white">{line.text}</Text>
-        </Box>
-      )
+      return <Text backgroundColor="#1a4a1a" color="white">  {line.text}</Text>
     case 'task_item':
-      return (
-        <Box>
-          <Text dimColor color="#7a9ec2">{line.text}</Text>
-        </Box>
-      )
+      return <Text dimColor color="#7a9ec2">  {line.text}</Text>
     case 'turn_end':
-      return <Text dimColor>╰──</Text>
+      return <Text dimColor>  ╰──</Text>
     case 'error':
-      return (
-        <Box>
-          <Text color="red">✖ </Text>
-          <Text color="red">{line.text}</Text>
-        </Box>
-      )
+      return <Text color="red">  ✖ {line.text}</Text>
     case 'info':
-      return (
-        <Box>
-          <Text dimColor>· </Text>
-          <Text dimColor>{line.text}</Text>
-        </Box>
-      )
+      return <Text dimColor>  · {line.text}</Text>
   }
 }
 
@@ -341,11 +445,17 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
 
   // ── State ───────────────────────────────────────────────────────────────────
   const [lines, setLines] = useState<OutputLine[]>([])
-  // Token buffer currently being streamed — lives OUTSIDE the Static block so
-  // the rest of the scrollback isn't repainted on every keystroke. When a `\n`
-  // is flushed, the completed text is pushed into `lines` (Static) and this
-  // clears.
-  const [liveText, setLiveText] = useState('')
+  // NOTE: there used to be a `liveText` state holding the in-flight token
+  // buffer before the next `\n` arrived, so the user could see tokens
+  // flowing in real time. It was removed in 0.84.50 because it caused the
+  // last line of every agent message to render twice. Streaming now
+  // renders line-by-line.
+  // Fence-tracking for the current message. `inCodeBlock` flips on every
+  // ``` line we see; `codeBlockCounter` is the 1-based index of the block
+  // we're currently inside (or just closed). Used by the renderer to
+  // toggle the dark background on code lines. Both reset per turn.
+  const inCodeBlockRef = useRef(false)
+  const codeBlockCounterRef = useRef(0)
   const [input, setInput] = useState('')
   const [isProcessing, setIsProcessing] = useState(false)
   const [pendingQueue, setPendingQueue] = useState<string[]>([])
@@ -375,6 +485,25 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
   // Permission picker nativo de Ink
   const [permissionRequest, setPermissionRequest] = useState<PermissionRequest | null>(null)
   const permissionRequestRef = useRef<PermissionRequest | null>(null)
+  // Currently-highlighted option in the permission picker. Resets to 0 whenever
+  // a new permissionRequest arrives so the user starts at "Allow once".
+  const [permissionIdx, setPermissionIdx] = useState(0)
+
+  // Pending AskUserQuestion tool-call. The agent invokes the tool with one
+  // question + options; we render an inline picker, the user answers, and
+  // the resolve callback hands the answer back to the agent. Multiple calls
+  // are processed one at a time (the executor awaits each) which produces
+  // the "one question at a time" UX the user expects.
+  interface PendingUserQuestion {
+    question: string
+    options: Array<{ label: string; description?: string }>
+    multi: boolean
+    resolve: (answer: string) => void
+  }
+  const [pendingQuestion, setPendingQuestion] = useState<PendingUserQuestion | null>(null)
+  const [pendingQuestionIdx, setPendingQuestionIdx] = useState(0)
+  // For multi-select: which option indices are currently checked.
+  const [pendingQuestionChecks, setPendingQuestionChecks] = useState<Set<number>>(new Set())
 
   const askPermissionInk = useCallback(async (
     toolName: string,
@@ -390,6 +519,7 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
       const req: PermissionRequest = { toolName, detail, patternSuggestion, resolve }
       permissionRequestRef.current = req
       setPermissionRequest(req)
+      setPermissionIdx(0)
     })
   }, [])
   // Ref para ctxPct accesible dentro del callback async de processTurn
@@ -410,6 +540,20 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
   useEffect(() => {
     isProcessingRef.current = isProcessing
   }, [isProcessing])
+
+  // Register the AskUserQuestion bridge with the tool executor.
+  // The agent invokes the tool; the executor calls this function and awaits;
+  // we open the picker, wait for the user, and resolve the awaited Promise.
+  useEffect(() => {
+    setUserQuestioner((question, options, multi) => {
+      return new Promise<string>(resolve => {
+        setPendingQuestion({ question, options, multi, resolve })
+        setPendingQuestionIdx(0)
+        setPendingQuestionChecks(new Set())
+      })
+    })
+    return () => setUserQuestioner(null)
+  }, [])
 
   // On mount: banner de bienvenida + info de sesión resumida
   useEffect(() => {
@@ -501,16 +645,46 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
     let hasAgentHeader = false
     let currentTextBuffer = ''
 
-    function flushText() {
-      if (!currentTextBuffer) {
-        setLiveText('')
-        return
+    /** Route one completed line to the right OutputLine kind, using the
+     *  current fence state. Mutates inCodeBlockRef / codeBlockCounterRef
+     *  as it detects fences. Returns the OutputLines to push. */
+    const routeLine = (rawLine: string): OutputLine[] => {
+      const fence = matchCodeFence(rawLine)
+      if (fence) {
+        if (inCodeBlockRef.current) {
+          // Closing fence — emit the pseudo-button.
+          const n = codeBlockCounterRef.current
+          inCodeBlockRef.current = false
+          return [makeLine('agent_code_fence_close', '', { blockIndex: n })]
+        }
+        // Opening fence — bump the block counter, emit the label.
+        codeBlockCounterRef.current += 1
+        inCodeBlockRef.current = true
+        return [makeLine('agent_code_fence_open', '', {
+          lang: fence.lang ?? undefined,
+          blockIndex: codeBlockCounterRef.current,
+        })]
       }
-      const textLines = makeBodyLines('agent_body', currentTextBuffer)
+      if (inCodeBlockRef.current) {
+        // Code content — no wrapping: keep indentation exact so the copy
+        // produces valid source when the user pastes elsewhere.
+        return [makeLine('agent_code', rawLine, { blockIndex: codeBlockCounterRef.current })]
+      }
+      // Regular prose — wrap to terminal width.
+      return makeBodyLines('agent_body', rawLine)
+    }
+
+    function flushText() {
+      if (!currentTextBuffer) return
+      const textLines = routeLine(currentTextBuffer)
       setLines(prev => [...prev, ...textLines])
       currentTextBuffer = ''
-      setLiveText('')
     }
+
+    // New agent turn starts → reset fence-tracking refs so the dark code
+    // background re-toggles correctly per message.
+    inCodeBlockRef.current = false
+    codeBlockCounterRef.current = 0
 
     try {
       for await (const event of agent.send(promptToSend, { cwd, model: routerModel, askPermission: askPermissionInk })) {
@@ -520,18 +694,14 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
             hasAgentHeader = true
           }
           currentTextBuffer += event.text
-          // Flush on newlines to keep streaming feel
+          // Flush complete lines (those ending in \n). Any tail without
+          // a terminating \n waits until the next chunk or flushText().
           if (currentTextBuffer.includes('\n')) {
             const parts = currentTextBuffer.split('\n')
             const incomplete = parts.pop()!
-            const complete = parts.flatMap(l => makeBodyLines('agent_body', l))
+            const complete = parts.flatMap(routeLine)
             setLines(prev => [...prev, ...complete])
             currentTextBuffer = incomplete
-            setLiveText(incomplete)
-          } else {
-            // No newline yet — surface the partial buffer in the live area so
-            // the user sees tokens as they stream, without repainting Static.
-            setLiveText(currentTextBuffer)
           }
         } else if (event.type === 'thinking' && event.text) {
           if (!hasAgentHeader) {
@@ -722,35 +892,148 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
     if ((key.ctrl && char === 'u') || key.pageUp) return
     if ((key.ctrl && char === 'd') || key.pageDown) return
 
+    // Copy shortcuts removed in v0.84.51 — code blocks render with a dark
+    // background + language label so they're visually distinct, and the
+    // user copies by selecting with the mouse and using their terminal's
+    // own Ctrl+C. This works because we no longer prefix lines with "│ ".
+
     // ── Permission picker ──────────────────────────────────────────────────────
+    // Interactive Claude-Code-style picker: ↑↓ navigate, Enter confirms,
+    // Esc denies. Numeric hotkeys (1/2/3/4) and y/n still work as quick
+    // shortcuts for users who prefer to type the answer outright.
     if (permissionRequest) {
       const req = permissionRequest
+      const opts = buildPermissionOptions(req)
       const resolve = (result: { approved: boolean; explanation?: string }) => {
         permissionRequestRef.current = null
         setPermissionRequest(null)
         req.resolve(result)
       }
-      if (char === 'y' || key.return) {
-        allowToolForSession(req.toolName)
-        resolve({ approved: true })
+      const apply = (id: PermissionOptionId) => {
+        if (id === 'once') {
+          resolve({ approved: true })
+        } else if (id === 'session') {
+          allowToolForSession(req.toolName)
+          resolve({ approved: true })
+        } else if (id === 'pattern' && req.patternSuggestion) {
+          allowPatternForSession(req.toolName, req.patternSuggestion)
+          resolve({ approved: true })
+        } else if (id === 'deny') {
+          resolve({ approved: false, explanation: 'denied by user' })
+        }
+      }
+
+      // Arrow / vim navigation
+      if (key.upArrow || char === 'k') {
+        setPermissionIdx(i => (i - 1 + opts.length) % opts.length)
         return
       }
-      if (char === '1') { resolve({ approved: true }); return }
-      if (char === '2') {
-        allowToolForSession(req.toolName)
-        resolve({ approved: true })
+      if (key.downArrow || char === 'j' || (key.tab && !key.shift)) {
+        setPermissionIdx(i => (i + 1) % opts.length)
         return
       }
-      if (char === '3' && req.patternSuggestion) {
-        allowPatternForSession(req.toolName, req.patternSuggestion)
-        resolve({ approved: true })
+      // Enter confirms the highlighted option
+      if (key.return) {
+        const safeIdx = Math.min(permissionIdx, opts.length - 1)
+        apply(opts[safeIdx].id)
         return
       }
-      if (char === 'n' || char === '4') {
-        resolve({ approved: false, explanation: 'denied by user' })
+      // Esc denies (matches Claude Code: Esc = "No, and tell me what to do")
+      if (key.escape) {
+        apply('deny')
         return
       }
-      return  // bloquea cualquier otra tecla mientras está el picker
+      // Numeric hotkeys: 1=once, 2=session, 3=pattern (if present), 4 (or 3 w/o pattern)=deny
+      if (char === '1') { apply('once'); return }
+      if (char === '2') { apply('session'); return }
+      if (char === '3') {
+        if (req.patternSuggestion) apply('pattern')
+        else apply('deny')
+        return
+      }
+      if (char === '4') { apply('deny'); return }
+      // Letter hotkeys
+      if (char === 'y') { apply('once'); return }
+      if (char === 'a') { apply('session'); return }
+      if (char === 'n') { apply('deny'); return }
+
+      return  // any other key is swallowed while the picker is open
+    }
+
+    // ── AskUserQuestion picker ─────────────────────────────────────────
+    // Opens when the agent invokes the AskUserQuestion tool. Sequential —
+    // each tool call is one question; multiple questions = multiple calls.
+    if (pendingQuestion) {
+      const q = pendingQuestion
+      const close = (answer: string) => {
+        // Echo the Q+A into the scrollback so the user has a record after
+        // the picker disappears (matches Claude Code's "answered list").
+        setLines(prev => [
+          ...prev,
+          makeLine('info', `? ${q.question}`),
+          makeLine('info', `→ ${answer || '(no answer)'}`),
+        ])
+        setPendingQuestion(null)
+        setPendingQuestionIdx(0)
+        setPendingQuestionChecks(new Set())
+        q.resolve(answer)
+      }
+      const opts = q.options
+
+      if (key.upArrow || char === 'k') {
+        setPendingQuestionIdx(i => (i - 1 + opts.length) % opts.length)
+        return
+      }
+      if (key.downArrow || char === 'j' || (key.tab && !key.shift)) {
+        setPendingQuestionIdx(i => (i + 1) % opts.length)
+        return
+      }
+      // Space: in multi mode, toggle the highlighted option's checkmark
+      if (q.multi && (char === ' ' || key.tab)) {
+        setPendingQuestionChecks(prev => {
+          const next = new Set(prev)
+          if (next.has(pendingQuestionIdx)) next.delete(pendingQuestionIdx)
+          else next.add(pendingQuestionIdx)
+          return next
+        })
+        return
+      }
+      if (key.return) {
+        if (q.multi) {
+          // Single Enter in multi mode confirms with whatever's checked
+          // (or the highlighted one if nothing was checked yet).
+          const picked = pendingQuestionChecks.size > 0
+            ? Array.from(pendingQuestionChecks).sort((a, b) => a - b)
+            : [pendingQuestionIdx]
+          close(picked.map(i => opts[i].label).join(', '))
+        } else {
+          close(opts[pendingQuestionIdx].label)
+        }
+        return
+      }
+      if (key.escape) {
+        close('')  // empty string = user declined / didn't answer
+        return
+      }
+      // Numeric hotkeys 1..9
+      if (char && /^[1-9]$/.test(char)) {
+        const n = Number.parseInt(char, 10) - 1
+        if (n < opts.length) {
+          if (q.multi) {
+            setPendingQuestionChecks(prev => {
+              const next = new Set(prev)
+              if (next.has(n)) next.delete(n)
+              else next.add(n)
+              return next
+            })
+            setPendingQuestionIdx(n)
+          } else {
+            close(opts[n].label)
+          }
+        }
+        return
+      }
+      return  // swallow everything else while the picker is open
     }
 
     // Ctrl+T: toggle task list
@@ -1088,23 +1371,11 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
         {(line: OutputLine) => <OutputLineView key={line.id} line={line} />}
       </Static>
 
-      {/* Live area — tokens being streamed + spinner. Repaints normally. */}
-      <Box flexDirection="column">
-        {/* Streaming buffer: tokens received since the last newline, so the
-            user sees them flowing without waiting for a \n to flush. */}
-        {liveText && (
-          <Box>
-            <Text dimColor>│ </Text>
-            <Text>{liveText}</Text>
-          </Box>
-        )}
-        {isProcessing && !liveText && (
-          <Box>
-            <Text dimColor>│ </Text>
-            <Text dimColor color="#c8a050">…</Text>
-          </Box>
-        )}
-      </Box>
+      {/* Live area — thinking animation while we wait for the first token
+          of the agent's response. All streamed text is append-only via
+          <Static> above, so nothing here needs to change once streaming
+          begins. */}
+      {isProcessing && <ThinkingLine />}
 
       {/* Task panel — panel fijo entre output y status, solo cuando hay tareas */}
       {!tasklistCollapsed && taskPanelItems.length > 0 && (
@@ -1131,20 +1402,67 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
         </Box>
       )}
 
-      {/* Permission picker — aparece encima del status cuando hay petición pendiente */}
-      {permissionRequest && (
-        <Box flexDirection="column" borderStyle="single" borderColor="#c8a050" paddingX={1}>
-          <Text color="#c8a050" bold>  Allow {permissionRequest.toolName}?  </Text>
-          <Text dimColor>  {permissionRequest.detail}</Text>
-          <Text> </Text>
-          <Text dimColor>  1 / Y  Allow once</Text>
-          <Text dimColor>  2      Allow {permissionRequest.toolName} for this session</Text>
-          {permissionRequest.patternSuggestion && (
-            <Text dimColor>  3      Allow pattern {permissionRequest.patternSuggestion}</Text>
-          )}
-          <Text dimColor>  N / 4  Deny</Text>
-        </Box>
-      )}
+      {/* AskUserQuestion picker — opens whenever the agent invokes the
+          AskUserQuestion tool. Same interaction model as the permission
+          picker (↑↓ navigate, Enter confirm, Esc cancel). Multi-select
+          mode shows checkboxes and uses Space/Tab to toggle. */}
+      {pendingQuestion && (() => {
+        const q = pendingQuestion
+        const safeIdx = Math.min(pendingQuestionIdx, q.options.length - 1)
+        return (
+          <Box flexDirection="column" borderStyle="single" borderColor="#7a9ec2" paddingX={1}>
+            <Text color="#7a9ec2" bold>? {q.question}</Text>
+            {q.multi && <Text dimColor>multi-select · space toggles · enter confirms what's checked</Text>}
+            <Text> </Text>
+            {q.options.map((opt, i) => {
+              const isSel = i === safeIdx
+              const checked = pendingQuestionChecks.has(i)
+              const cursor = isSel ? '❯' : ' '
+              const box = q.multi ? (checked ? '[x]' : '[ ]') : `${i + 1}.`
+              return (
+                <Box key={i}>
+                  <Text color={isSel ? '#7a9ec2' : undefined} bold={isSel}>{cursor} </Text>
+                  <Text dimColor>{box} </Text>
+                  <Text bold={isSel}>{opt.label}</Text>
+                  {opt.description && <Text dimColor>  {opt.description}</Text>}
+                </Box>
+              )
+            })}
+            <Text> </Text>
+            <Text dimColor>↑↓ move · enter select · esc cancel · 1-9 jump</Text>
+          </Box>
+        )
+      })()}
+
+      {/* Permission picker — interactive list, ↑↓ + Enter, like Claude Code.
+          Numeric / y / n hotkeys still work. Esc denies. */}
+      {permissionRequest && (() => {
+        const opts = buildPermissionOptions(permissionRequest)
+        const safeIdx = Math.min(permissionIdx, opts.length - 1)
+        return (
+          <Box flexDirection="column" borderStyle="single" borderColor="#c8a050" paddingX={1}>
+            <Text color="#c8a050" bold>Allow {permissionRequest.toolName}?</Text>
+            <Text dimColor>{permissionRequest.detail}</Text>
+            <Text> </Text>
+            {opts.map((opt, i) => {
+              const isSel = i === safeIdx
+              const cursor = isSel ? '❯' : ' '
+              const numHint = `${i + 1}.`
+              const labelColor = opt.danger ? 'red' : (isSel ? '#6aaa6a' : undefined)
+              return (
+                <Box key={opt.id}>
+                  <Text color={isSel ? '#6aaa6a' : undefined} bold={isSel}>{cursor} </Text>
+                  <Text dimColor>{numHint} </Text>
+                  <Text color={labelColor} bold={isSel}>{opt.label}</Text>
+                  {opt.hint && <Text dimColor>  {opt.hint}</Text>}
+                </Box>
+              )
+            })}
+            <Text> </Text>
+            <Text dimColor>↑↓ move · enter select · esc denies · 1/2/3/4 jump</Text>
+          </Box>
+        )
+      })()}
 
       {/* Help overlay — flota encima del status sin tocar el output */}
       {showHelp && (

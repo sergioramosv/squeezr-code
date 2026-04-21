@@ -1,38 +1,9 @@
 import type { AuthStatus } from '../auth/manager.js'
-import { getLoadedModels, resolveFamilyShortcut, type ModelInfo } from '../api/models.js'
-
-/**
- * Picker interactivo + helpers de resolución de alias.
- *
- * La lista de modelos YA NO es una constante: se carga dinámicamente contra
- * /v1/models de cada provider (ver src/api/models.ts).  El picker simplemente
- * dibuja lo que hay cargado en el registro.
- */
-
-// ─── Resolución de alias ────────────────────────────────────────────
-//
-// El usuario puede escribir:
-//   /model opus               → el último Opus disponible  (resolveFamilyShortcut)
-//   /model opus-4.7           → exactamente ese alias
-//   /model claude-opus-4-7    → el id completo
-//   @sonnet explica esto      → mismo patrón
-export function resolveModelAlias(input: string): string {
-  const models = getLoadedModels()
-  // id exacto
-  const byId = models.find(m => m.id === input)
-  if (byId) return byId.id
-  // alias derivado (opus-4.7, sonnet-4.6, 5.4-mini, 5-codex, …)
-  const byAlias = models.find(m => m.alias === input)
-  if (byAlias) return byAlias.id
-  // familia (opus → último opus)
-  const family = resolveFamilyShortcut(input, models)
-  if (family) return family
-  // Fallback sin catálogo cargado: aliases que empiezan por dígito son Codex.
-  //   "5.4-mini"  →  "gpt-5.4-mini"
-  //   "5-codex"   →  "gpt-5-codex"
-  if (/^\d/.test(input)) return `gpt-${input}`
-  return input
-}
+import { getLoadedModels, type ModelInfo } from '../api/models.js'
+// Re-export so existing imports `from '../repl/model-picker.js'` keep working.
+// The real implementation lives in ../api/models.js so it can also be called
+// from the agent (which shouldn't depend on the REPL layer).
+export { resolveModelAlias } from '../api/models.js'
 
 /** Devuelve la lista de keys aceptadas por el completer (TAB). */
 export function getAliasKeys(): string[] {

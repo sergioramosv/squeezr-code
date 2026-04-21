@@ -47,7 +47,8 @@ Rules:
 - When running Bash commands, use absolute paths when possible.
 - If a tool fails, diagnose the issue before retrying.
 - For multi-step work, create tasks with TaskCreate so the user sees progress.
-- When the user asks "should I use X or Y?" or there's genuine ambiguity, USE AskUserQuestion with 2-4 options instead of picking unilaterally.`)
+- When the user asks "should I use X or Y?" or there's genuine ambiguity, USE AskUserQuestion with 2-4 options instead of picking unilaterally.
+- NEVER write a numbered list of questions in markdown like "**1. ¿Quién…? **2. ¿Cómo…?**". The user can't pick from text. If you have multiple decisions to ask, call AskUserQuestion ONCE PER QUESTION (the harness will show them sequentially and the user picks each with arrow keys + Enter — much better UX than a wall of markdown questions).`)
 
   parts.push(`\nWorking directory: ${opts.cwd}`)
 
