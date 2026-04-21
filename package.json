@@ -1,6 +1,6 @@
 {
   "name": "squeezr-code",
-  "version": "0.84.53",
+  "version": "0.84.58",
   "description": "The intelligent CLI that never loses context",
   "type": "module",
   "bin": {

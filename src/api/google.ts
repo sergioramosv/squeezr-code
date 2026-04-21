@@ -423,6 +423,9 @@ function recordUsageAndSnapshot(tokens: number): import('./types.js').Subscripti
   return {
     provider: 'google',
     fiveHour: pct,
+    fiveHourSonnet: 0,
+    fiveHourOpus: 0,
+    fiveHourHaiku: 0,
     fiveHourResetAt: resetAt,
     sevenDay: 0,
     sevenDaySonnet: 0,

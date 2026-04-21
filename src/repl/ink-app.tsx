@@ -35,6 +35,7 @@ import { classifyPromptForRouter } from './repl.js'
 import { resolveModelAlias, getAliasKeys } from './model-picker.js'
 import { type CustomCommand, expandCustomCommand } from './custom-commands.js'
 import { setUserQuestioner } from '../tools/executor.js'
+import { renderMdLine } from './markdown.js'
 // clipboard-write and code-blocks are intentionally NOT imported here —
 // the Ctrl+Y / Ctrl+N copy shortcuts were removed in 0.84.51 in favour of
 // terminal-native mouse selection + Ctrl+C. The helpers stay on disk in
@@ -325,7 +326,20 @@ const THINKING_VERBS = [
 ]
 const SPARKLE_FRAMES = ['✶', '✦', '✧', '⋆']
 
-function ThinkingLine(): React.ReactElement {
+function formatTokenCount(n: number): string {
+  if (n < 1000) return String(n)
+  // 3.8k rather than 3800 — mirrors Claude Code's `↓ 3.8k tokens` style.
+  const thousands = n / 1000
+  return thousands >= 10 ? `${thousands.toFixed(0)}k` : `${thousands.toFixed(1)}k`
+}
+
+interface ThinkingLineProps {
+  /** Output tokens streamed so far in the current turn. Incrementing while
+   *  `isProcessing` is true. Starts at 0 and resets at every new turn. */
+  tokens?: number
+}
+
+function ThinkingLine({ tokens = 0 }: ThinkingLineProps): React.ReactElement {
   const [frame, setFrame] = useState(0)
   const [verbIdx, setVerbIdx] = useState(() => Math.floor(Math.random() * THINKING_VERBS.length))
   const [elapsed, setElapsed] = useState(0)
@@ -352,17 +366,28 @@ function ThinkingLine(): React.ReactElement {
   const m = Math.floor(elapsed / 60)
   const s = elapsed % 60
   const elapsedText = m > 0 ? `${m}m ${s}s` : `${s}s`
+  const tokensText = tokens > 0 ? ` · ↓ ${formatTokenCount(tokens)} tokens` : ''
+  const cancelText = elapsed > 3 ? ' · esc to cancel' : ''
 
   return (
     <Box>
-      <Text color="#c8a050">{SPARKLE_FRAMES[frame]} </Text>
+      <Text color="#c8a050">  {SPARKLE_FRAMES[frame]} </Text>
       <Text color="#c8a050">{THINKING_VERBS[verbIdx]}… </Text>
-      <Text dimColor>({elapsedText}{elapsed > 3 ? ' · esc to cancel' : ''})</Text>
+      <Text dimColor>({elapsedText}{tokensText}{cancelText})</Text>
     </Box>
   )
 }
 
 function OutputLineView({ line }: { line: OutputLine }): React.ReactElement {
+  // useStdout gives us the live terminal width. We anchor the background
+  // boxes to this explicit column count rather than "100%", because
+  // "100%" inside <Static> anchors to the parent box, not to the viewport
+  // — the gray bar ends up only as wide as the text itself, which was
+  // what the user was seeing. Absolute `width={cols}` forces a full-row
+  // strip regardless of parent.
+  const { stdout } = useStdout()
+  const cols = stdout.columns || 80
+
   switch (line.kind) {
     // NOTE: the "│ " left gutter that previously prefixed every turn has
     // been removed. It was visually distinctive but terminals don't let
@@ -376,16 +401,14 @@ function OutputLineView({ line }: { line: OutputLine }): React.ReactElement {
     // when terminals copy-paste sequences across escape codes. Box wrappers
     // are kept only where a backgroundColor is needed.
     case 'user_header':
-      // width="100%" makes the gray background span the entire row, not
-      // just the width of the "you" text. Same for user_body below.
       return (
-        <Box backgroundColor="#303030" width="100%">
+        <Box backgroundColor="#303030" width={cols}>
           <Text dimColor>  you</Text>
         </Box>
       )
     case 'user_body':
       return (
-        <Box backgroundColor="#303030" width="100%">
+        <Box backgroundColor="#303030" width={cols}>
           <Text color="white">  {line.text}</Text>
         </Box>
       )
@@ -396,27 +419,39 @@ function OutputLineView({ line }: { line: OutputLine }): React.ReactElement {
     case 'agent_header':
       return <Text color="#6aaa6a" bold>  Squeezr</Text>
     case 'agent_body':
-      return <Text>  {line.text}</Text>
+      // Render markdown inline formatting (headings, bold, italic, lists,
+      // inline code, links, horizontal rules). renderMdLine emits raw ANSI
+      // escape codes that Ink forwards verbatim to stdout, so <Text>
+      // gets interpreted by the terminal, not double-parsed by Ink.
+      return <Text>  {renderMdLine(line.text)}</Text>
     case 'agent_code_fence_open': {
-      const lang = line.lang?.trim() || 'code'
+      const lang = line.lang?.trim()
       const n = line.blockIndex ?? 0
       return (
-        <Box backgroundColor="#1a1a1a">
-          <Text color="#7a9ec2" bold> {lang} </Text>
-          <Text dimColor> · block #{n}</Text>
+        <Box backgroundColor="#1a1a1a" width={cols}>
+          {lang
+            ? <Text color="#7a9ec2" bold>  {lang}  </Text>
+            : <Text dimColor>  code  </Text>
+          }
+          <Text dimColor>· block #{n}</Text>
         </Box>
       )
     }
     case 'agent_code':
       return (
-        <Box backgroundColor="#1a1a1a">
+        <Box backgroundColor="#1a1a1a" width={cols}>
           <Text color="#e0e0e0">  {line.text}</Text>
         </Box>
       )
     case 'agent_code_fence_close':
-      // Closing fence renders as a thin spacer so there's a visual end to
-      // the dark code-block area before regular prose continues.
-      return <Text dimColor> </Text>
+      // Closing fence renders as a thin dark strip so the code block has
+      // a visual bottom edge before regular prose continues. Full-width
+      // so it lines up with the other code-block rows.
+      return (
+        <Box backgroundColor="#1a1a1a" width={cols}>
+          <Text> </Text>
+        </Box>
+      )
     case 'thinking':
       return <Text dimColor color="#7a9ec2">  {line.text}</Text>
     case 'tool_start':
@@ -456,6 +491,11 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
   // toggle the dark background on code lines. Both reset per turn.
   const inCodeBlockRef = useRef(false)
   const codeBlockCounterRef = useRef(0)
+  // Running count of output tokens streamed in the *current* turn. Feeds
+  // the ThinkingLine's "↓ 3.8k tokens" indicator. LLMs don't report usage
+  // until the turn ends, so we estimate via ~4 chars = 1 token. Gets
+  // replaced by the accurate count from the 'cost' event once it arrives.
+  const [streamTokens, setStreamTokens] = useState(0)
   const [input, setInput] = useState('')
   const [isProcessing, setIsProcessing] = useState(false)
   const [pendingQueue, setPendingQueue] = useState<string[]>([])
@@ -682,9 +722,11 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
     }
 
     // New agent turn starts → reset fence-tracking refs so the dark code
-    // background re-toggles correctly per message.
+    // background re-toggles correctly per message, and zero the per-turn
+    // token counter that feeds ThinkingLine.
     inCodeBlockRef.current = false
     codeBlockCounterRef.current = 0
+    setStreamTokens(0)
 
     try {
       for await (const event of agent.send(promptToSend, { cwd, model: routerModel, askPermission: askPermissionInk })) {
@@ -694,6 +736,12 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
             hasAgentHeader = true
           }
           currentTextBuffer += event.text
+          // Rough token estimate (≈4 chars/token for English+code). Shown
+          // live in ThinkingLine. Overwritten by the accurate usage
+          // number when the turn ends ('cost' event).
+          if (event.text.length > 0) {
+            setStreamTokens(t => t + Math.ceil(event.text!.length / 4))
+          }
           // Flush complete lines (those ending in \n). Any tail without
           // a terminating \n waits until the next chunk or flushText().
           if (currentTextBuffer.includes('\n')) {
@@ -736,10 +784,23 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
         } else if (event.type === 'cost' && event.cost) {
           setCost(prev => prev + event.cost!.usd)
           setModel(event.cost.model)
+          // Replace the chars/4 estimate with the accurate output token
+          // count from the provider, once it's known.
+          if (event.usage?.outputTokens != null) {
+            setStreamTokens(event.usage.outputTokens)
+          }
         } else if (event.type === 'subscription' && event.subscription) {
-          // Cap at 100 — Anthropic returns > 1.0 during burst allowance, which
-          // would render as "102%" and confuse the user.
-          const pct = Math.min(100, Math.round(event.subscription.fiveHour * 100))
+          // Prefer the family-specific 5h utilisation (what Claude Code
+          // shows) over the aggregate. Cap at 100 so burst allowance that
+          // slightly exceeds the soft-limit doesn't render as "102%".
+          const sub = event.subscription
+          const currentModel = agent.getCurrentModel()
+          const frac =
+            /sonnet/.test(currentModel) && sub.fiveHourSonnet > 0 ? sub.fiveHourSonnet :
+            /opus/.test(currentModel)   && sub.fiveHourOpus   > 0 ? sub.fiveHourOpus :
+            /haiku/.test(currentModel)  && sub.fiveHourHaiku  > 0 ? sub.fiveHourHaiku :
+            sub.fiveHour
+          const pct = Math.min(100, Math.round(frac * 100))
           ctxPctRef.current = pct
           setCtxPct(pct)
         } else if (event.type === 'error' && event.error) {
@@ -1371,11 +1432,11 @@ export function App({ agent, config, cwd, projectName, resumedInfo, version, aut
         {(line: OutputLine) => <OutputLineView key={line.id} line={line} />}
       </Static>
 
-      {/* Live area — thinking animation while we wait for the first token
-          of the agent's response. All streamed text is append-only via
-          <Static> above, so nothing here needs to change once streaming
-          begins. */}
-      {isProcessing && <ThinkingLine />}
+      {/* Live area — thinking animation during the whole agent turn.
+          The verb cycles, elapsed time ticks, and the token counter
+          climbs as chunks stream in. Repaints only this one line; the
+          scrollback (Static) stays untouched. */}
+      {isProcessing && <ThinkingLine tokens={streamTokens} />}
 
       {/* Task panel — panel fijo entre output y status, solo cuando hay tareas */}
       {!tasklistCollapsed && taskPanelItems.length > 0 && (

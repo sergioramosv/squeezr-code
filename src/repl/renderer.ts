@@ -51,6 +51,18 @@ function providerOfModel(model: string): 'anthropic' | 'openai' | 'google' {
   return 'anthropic'
 }
 
+/** Pick the 5h utilisation that matches the *active* model, not the global
+ *  aggregate. Anthropic emits a per-family header alongside the global
+ *  one; Claude Code's status bar uses the family-specific one, so to keep
+ *  the two CLIs in sync we do the same. Falls back to the aggregate if
+ *  the family-specific header is missing (0). */
+export function effectiveFiveHour(sub: import('../api/types.js').SubscriptionUsage, model: string): number {
+  if (/sonnet/.test(model) && sub.fiveHourSonnet > 0) return sub.fiveHourSonnet
+  if (/opus/.test(model)   && sub.fiveHourOpus   > 0) return sub.fiveHourOpus
+  if (/haiku/.test(model)  && sub.fiveHourHaiku  > 0) return sub.fiveHourHaiku
+  return sub.fiveHour
+}
+
 function colorPct(pct: number): string {
   if (pct >= 90) return RED
   if (pct >= 70) return YELLOW
@@ -694,7 +706,7 @@ export class Renderer {
       // Anthropic puede devolver >1.0 en la ventana de 5h cuando te pasas del
       // soft-limit (burst allowance) — cap a 100% y anéxalo con `!` para que el
       // usuario vea que está al tope en vez del confuso "102%".
-      const rawPct = sub.fiveHour * 100
+      const rawPct = effectiveFiveHour(sub, info.model) * 100
       const over = rawPct > 100
       const clamped = Math.min(rawPct, 100)
       const pct = Math.round(clamped)
@@ -740,7 +752,7 @@ export class Renderer {
     const sub = info.subscriptions?.[currentProvider] || null
 
     if (sub) {
-      const rawPct = sub.fiveHour * 100
+      const rawPct = effectiveFiveHour(sub, info.model) * 100
       const over = rawPct > 100
       const clamped = Math.min(rawPct, 100)
       const pct = Math.round(clamped)

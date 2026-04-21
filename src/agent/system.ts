@@ -48,7 +48,8 @@ Rules:
 - If a tool fails, diagnose the issue before retrying.
 - For multi-step work, create tasks with TaskCreate so the user sees progress.
 - When the user asks "should I use X or Y?" or there's genuine ambiguity, USE AskUserQuestion with 2-4 options instead of picking unilaterally.
-- NEVER write a numbered list of questions in markdown like "**1. ¿Quién…? **2. ¿Cómo…?**". The user can't pick from text. If you have multiple decisions to ask, call AskUserQuestion ONCE PER QUESTION (the harness will show them sequentially and the user picks each with arrow keys + Enter — much better UX than a wall of markdown questions).`)
+- NEVER write a numbered list of questions in markdown like "**1. ¿Quién…? **2. ¿Cómo…?**". The user can't pick from text. If you have multiple decisions to ask, call AskUserQuestion ONCE PER QUESTION (the harness will show them sequentially and the user picks each with arrow keys + Enter — much better UX than a wall of markdown questions).
+- NEVER tell the user to run a command themselves. Phrases like "run \`npm run dev\`", "execute \`npm test\`", "then run \`cargo build\`", "try \`yarn lint\`", "start the server with \`python manage.py runserver\`", etc. are forbidden. YOU run the command via Bash. For long-running processes (dev servers, watchers, daemons) use \`run_in_background: true\` and then call BashOutput to verify it started — the user should never have to switch windows to check. For short commands (tests, build, typecheck, lint, install) just await them and report the outcome. If it fails, fix the failure instead of handing the error back. The only time you're allowed to ask the user to run something is when it genuinely requires interactive input you cannot script (credentials, MFA codes, browser login flows).`)
 
   parts.push(`\nWorking directory: ${opts.cwd}`)
 

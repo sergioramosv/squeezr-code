@@ -328,6 +328,13 @@ function parseSubscriptionHeaders(headers: Headers): SubscriptionUsage | null {
   return {
     provider: 'anthropic',
     fiveHour: num(fiveHour),
+    // Per-family utilisation. Anthropic emits these alongside the global
+    // one — Claude Code surfaces the family that matches the active model
+    // (the discrepancy between "18% global" and "11% real" came from
+    // showing the aggregate instead of the sonnet-specific number).
+    fiveHourSonnet: num(headers.get('anthropic-ratelimit-unified-5h_sonnet-utilization')),
+    fiveHourOpus: num(headers.get('anthropic-ratelimit-unified-5h_opus-utilization')),
+    fiveHourHaiku: num(headers.get('anthropic-ratelimit-unified-5h_haiku-utilization')),
     fiveHourResetAt: ts(headers.get('anthropic-ratelimit-unified-5h-reset')),
     sevenDay: num(headers.get('anthropic-ratelimit-unified-7d-utilization')),
     sevenDaySonnet: num(headers.get('anthropic-ratelimit-unified-7d_sonnet-utilization')),

@@ -397,6 +397,9 @@ export class OpenAIAdapter implements APIAdapter {
         const sub: SubscriptionUsage = {
           provider: 'openai',
           fiveHour: (pri.used_percent || 0) / 100,
+          fiveHourSonnet: 0,
+          fiveHourOpus: 0,
+          fiveHourHaiku: 0,
           fiveHourResetAt: (pri.reset_at || 0) * 1000,
           sevenDay: (sec?.used_percent || 0) / 100,
           sevenDaySonnet: 0,

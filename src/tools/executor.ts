@@ -47,7 +47,7 @@ export function setPlanApprover(fn: PlanApprover | null): void { planApprover = 
 
 const execAsync = promisify(exec)
 
-const DANGEROUS_TOOLS = ['Bash', 'Write', 'Edit']
+export const DANGEROUS_TOOLS = ['Bash', 'Write', 'Edit']
 
 export type PermissionMode = 'default' | 'accept-edits' | 'plan' | 'bypass' | 'auto' | 'yolo'
 
@@ -66,6 +66,10 @@ export interface ToolExecOpts {
   /** Sandbox Docker para Bash. Si está, los comandos corren dentro del container. */
   sandbox?: { enabled: boolean; image: string }
   askPermission?: (toolName: string, input: Record<string, unknown>) => Promise<{ approved: boolean; explanation?: string }>
+  /** If true, skip the permission gate entirely — the caller has already
+   *  resolved it (e.g. via `resolveToolPermission`) and is about to run
+   *  the tool. Prevents the prompt from appearing twice. */
+  preApproved?: boolean
 }
 
 const EDIT_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit'])
@@ -74,58 +78,69 @@ const MODIFYING_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit', 'Bash'])
 // contener secrets. Las excluimos de acción-pura como Write/Edit.
 const SCAN_TOOLS = new Set(['Read', 'Bash', 'BashOutput', 'WebFetch', 'WebSearch', 'Grep', 'Monitor'])
 
+/**
+ * Decide whether a tool call is allowed, denied or needs to prompt the
+ * user — WITHOUT running the tool itself. Exposed so the agent can call
+ * this BEFORE emitting `tool_start`, otherwise the scrollback shows the
+ * "▸ Edit foo.ts" line before the user has had a chance to answer the
+ * picker, and it looks like the edit already happened.
+ */
+export async function resolveToolPermission(
+  name: string,
+  input: Record<string, unknown>,
+  opts: ToolExecOpts,
+): Promise<{ allowed: true } | { allowed: false; message: string }> {
+  // 1. Granular rules (deny / allow) first.
+  if (opts.rules) {
+    const decision = evaluateRules(name, input, opts.rules)
+    if (decision === 'deny') {
+      return { allowed: false, message: `Tool denied by permission rule: ${name}` }
+    }
+    if (decision === 'allow') return { allowed: true }
+  }
+  // 2. Plan mode blocks modifying tools (ExitPlanMode is the escape hatch).
+  if (opts.permissions === 'plan' && MODIFYING_TOOLS.has(name) && name !== 'ExitPlanMode') {
+    return {
+      allowed: false,
+      message: `Tool ${name} blocked by plan mode. Call ExitPlanMode with your complete plan in markdown to request user approval, or keep investigating with Read/Grep/Glob before proposing.`,
+    }
+  }
+  // 3. Modes that skip the prompt entirely.
+  if (opts.permissions === 'bypass' || opts.permissions === 'yolo' || opts.permissions === 'auto') {
+    return { allowed: true }
+  }
+  // 4. accept-edits: auto-allow Write/Edit/NotebookEdit, prompt only Bash.
+  if (opts.permissions === 'accept-edits') {
+    if (EDIT_TOOLS.has(name)) return { allowed: true }
+    if (name === 'Bash' && opts.askPermission) {
+      const res = await opts.askPermission(name, input)
+      if (!res.approved) {
+        return { allowed: false, message: res.explanation ? `Tool denied by user: ${res.explanation}` : 'Tool execution denied by user' }
+      }
+    }
+    return { allowed: true }
+  }
+  // 5. Default: prompt before dangerous tools.
+  if (opts.permissions === 'default' && DANGEROUS_TOOLS.includes(name)) {
+    if (opts.askPermission) {
+      const res = await opts.askPermission(name, input)
+      if (!res.approved) {
+        return { allowed: false, message: res.explanation ? `Tool denied by user: ${res.explanation}` : 'Tool execution denied by user' }
+      }
+    }
+  }
+  return { allowed: true }
+}
+
 export async function executeTool(
   name: string,
   input: Record<string, unknown>,
   opts: ToolExecOpts,
 ): Promise<string> {
-
-  // 1. Reglas granulares primero. Deny corta siempre, allow salta la pregunta.
-  if (opts.rules) {
-    const decision = evaluateRules(name, input, opts.rules)
-    if (decision === 'deny') {
-      return `Tool denied by permission rule: ${name}`
-    }
-    if (decision === 'allow') {
-      // Salta askPermission aunque sea tool "peligroso".
-      return executeInner(name, input, opts)
-    }
+  if (!opts.preApproved) {
+    const decision = await resolveToolPermission(name, input, opts)
+    if (!decision.allowed) return decision.message
   }
-
-  // 2. Plan mode: bloquea tools modificadoras. ExitPlanMode SÍ se permite
-  //    (es el escape hatch para que el agente presente plan + pida aprobación).
-  //    Si aprueba, el REPL cambia el mode a accept-edits via planApprover.
-  if (opts.permissions === 'plan' && MODIFYING_TOOLS.has(name) && name !== 'ExitPlanMode') {
-    return `Tool ${name} blocked by plan mode. Call ExitPlanMode with your complete plan in markdown to request user approval, or keep investigating with Read/Grep/Glob before proposing.`
-  }
-
-  // 3. Bypass / yolo / auto: aprueba todo sin preguntar.
-  if (opts.permissions === 'bypass' || opts.permissions === 'yolo' || opts.permissions === 'auto') {
-    return executeInner(name, input, opts)
-  }
-
-  // 4. Accept-edits: auto-aprueba Write/Edit/NotebookEdit, pregunta Bash.
-  if (opts.permissions === 'accept-edits') {
-    if (EDIT_TOOLS.has(name)) return executeInner(name, input, opts)
-    if (name === 'Bash' && opts.askPermission) {
-      const res = await opts.askPermission(name, input)
-      if (!res.approved) {
-        return res.explanation ? `Tool denied by user: ${res.explanation}` : 'Tool execution denied by user'
-      }
-    }
-    return executeInner(name, input, opts)
-  }
-
-  // 5. Default: pregunta antes de tools peligrosas.
-  if (opts.permissions === 'default' && DANGEROUS_TOOLS.includes(name)) {
-    if (opts.askPermission) {
-      const res = await opts.askPermission(name, input)
-      if (!res.approved) {
-        return res.explanation ? `Tool denied by user: ${res.explanation}` : 'Tool execution denied by user'
-      }
-    }
-  }
-
   return executeInner(name, input, opts)
 }
 

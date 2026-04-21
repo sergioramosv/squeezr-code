@@ -6,6 +6,102 @@ versionado según [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.84.58] - 2026-04-21
+
+### Changed
+- **El agente ya NO le dice al usuario "ejecuta `npm run dev`".** System
+  prompt endurecido: prohibido pedir al user que corra comandos — el
+  agente los ejecuta. Para procesos de larga duración (dev servers,
+  watchers, daemons) usa `Bash` con `run_in_background: true` y luego
+  verifica con `BashOutput`. Para comandos cortos (tests, build,
+  typecheck, lint, install) los espera y reporta el resultado. Única
+  excepción aceptada: cuando el comando necesita input interactivo que
+  no se puede scriptar (credenciales, MFA, OAuth en navegador).
+
+## [0.84.57] - 2026-04-21
+
+### Fixed
+- **Fondo gris del mensaje del user no cubría toda la fila.** La v0.84.53
+  puso `width="100%"` en el `Box` del `user_header` / `user_body`, pero
+  dentro de `<Static>` el porcentaje se ancla al contenedor padre (no al
+  viewport), así que el gris solo llegaba hasta donde terminaba el texto.
+  Ahora `OutputLineView` usa `useStdout()` para leer `stdout.columns` en
+  vivo y ancla el fondo a `width={cols}` — ancho absoluto en columnas,
+  se ve como una franja completa de pared a pared. Misma corrección
+  aplicada a los bloques de código (`agent_code_fence_open`,
+  `agent_code`, `agent_code_fence_close`): el fondo oscuro también
+  cubre toda la fila y queda como un bloque visualmente cerrado.
+
+## [0.84.56] - 2026-04-21
+
+### Fixed
+- **Edit/Write/Bash parecían ejecutarse ANTES de responder al picker.**
+  El agent emitía `tool_start` inmediatamente al detectar la tool call
+  del modelo, así el scrollback pintaba `▸ Edit foo.ts` y después
+  aparecía el picker pidiendo permiso. Visualmente parecía que el agente
+  ya había editado aunque nada se había tocado en disco. **Fix:**
+  refactor del loop en `agent.ts` — cuando el tool es `sequential` (no
+  `PARALLEL_SAFE_TOOLS`), el permiso se resuelve PRIMERO vía
+  `resolveToolPermission` (nueva función exportada desde el executor), y
+  sólo si el user aprueba se emite `tool_start` y se ejecuta el tool.
+  Si deniega, ni siquiera se pinta la línea del tool en scrollback:
+  directamente llega el `tool_result` con el mensaje de denegación.
+  Añadido flag `preApproved` a `ToolExecOpts` para que `executeTool` no
+  repita la pregunta internamente (evita doble picker).
+
+## [0.84.55] - 2026-04-21
+
+### Changed
+- **Markdown rendering activado para el texto del agente.** Antes
+  `agent_body` se pintaba tal cual (`## Heading`, `**bold**`, `---`, `-
+  lista` se veían como texto plano). Ahora cada línea pasa por
+  `renderMdLine` (que ya existía en `src/repl/markdown.ts`) y se emiten
+  los ANSI escape codes apropiados que Ink reenvía al stdout: headings
+  con color/bold (H1 con gradiente del banner, H2/H3 verdes), negritas
+  `**...**`, cursivas `*...*`, inline code en magenta, listas con
+  bullet `•` / numeradas, `---` como línea horizontal, links `[t](u)`
+  clicables (OSC 8).
+- **Etiqueta del bloque de código sin lenguaje.** Cuando el agente abría
+  un fence con ` ``` ` sin lenguaje, se mostraba `code · block #N`. El
+  `code` era mi fallback feo. Ahora la barra muestra `code · block #N`
+  en dim si no hay lenguaje, o `lang · block #N` en azul bold si sí.
+- **Code blocks full-width.** Las líneas del bloque (`agent_code`,
+  `agent_code_fence_open`, `agent_code_fence_close`) ahora tienen
+  `width="100%"`, así el fondo oscuro forma una franja completa igual
+  que el fondo gris del `user_body`, en lugar de cubrir sólo el texto.
+
+### Known caveats
+- **Wrap + markdown puede romper formato en frases muy largas.** El
+  word-wrap de `wrapText` corta por ancho y si una negrita `**...**`
+  atraviesa el corte, esa frase concreta pierde el estilo (los asteriscos
+  se ven literales). Queda para una iteración futura: un wrap que
+  respete los marcadores de markdown.
+
+## [0.84.54] - 2026-04-21
+
+### Fixed
+- **Porcentaje 5h mostraba el agregado global en vez del per-modelo.** Se
+  veía "18%" cuando Claude Code marcaba "11%" para el mismo momento.
+  Anthropic emite en los headers tanto el uso global
+  (`anthropic-ratelimit-unified-5h-utilization`) como el específico por
+  familia (`anthropic-ratelimit-unified-5h_sonnet-utilization`,
+  `...-5h_opus-...`, `...-5h_haiku-...`). Claude Code muestra el de la
+  familia activa; squeezr estaba mostrando el agregado. Ahora la status
+  bar y el evento `subscription` eligen el per-familia cuando el modelo
+  actual es un Sonnet/Opus/Haiku, con fallback al agregado si el header
+  per-familia no viene. Helper `effectiveFiveHour(sub, model)` en
+  `renderer.ts`. Tipo `SubscriptionUsage` extendido con `fiveHourSonnet`,
+  `fiveHourOpus`, `fiveHourHaiku`.
+
+### Added
+- **Contador de tokens en vivo en la animación "Squeezr pensando".** La
+  línea pasa de `✶ Bloviating… (3m 59s · esc to cancel)` a
+  `✶ Bloviating… (3m 59s · ↓ 3.8k tokens · esc to cancel)`. Se
+  incrementa con una estimación rápida (≈4 chars/token) conforme llegan
+  chunks del stream, y se sustituye por el valor exacto cuando termina
+  el turno (evento `cost`). Formato `3.8k` para miles, `12k` a partir de
+  diez mil. Reset a 0 en cada nuevo turno.
+
 ## [0.84.53] - 2026-04-20
 
 ### Added

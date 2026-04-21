@@ -4,7 +4,7 @@ import { Brain } from '../brain/brain.js'
 import { handleAPIError, sleep } from '../api/retry.js'
 import { resolveModelAlias } from '../api/models.js'
 import { SQ_TOOLS } from '../tools/definitions.js'
-import { executeTool } from '../tools/executor.js'
+import { executeTool, resolveToolPermission } from '../tools/executor.js'
 import { buildSystemPrompt } from './system.js'
 import type { McpManager } from '../mcp/manager.js'
 import { HookRunner, loadHooks } from './hooks.js'
@@ -337,7 +337,13 @@ export class SqAgent {
         pending.length = 0
       }
 
-      const runToolAsync = async (name: string, input: Record<string, unknown>): Promise<{ result: string; isError: boolean }> => {
+      const runToolAsync = async (
+        name: string,
+        input: Record<string, unknown>,
+        /** true when the caller has already resolved the permission — skips
+         *  the picker inside executeTool so it doesn't appear twice. */
+        preApproved = false,
+      ): Promise<{ result: string; isError: boolean }> => {
         try {
           const isMcp = this.mcp?.isMcpTool(name) || false
           const result = isMcp
@@ -348,6 +354,7 @@ export class SqAgent {
               rules: this.config.rules,
               sandbox: this.config.sandbox,
               askPermission: opts?.askPermission,
+              preApproved,
             })
           return { result, isError: false }
         } catch (toolErr) {
@@ -386,15 +393,15 @@ export class SqAgent {
 
             this.hooks.fire('PreToolUse', { toolName: chunk.name!, input: toolInput, cwd })
 
-            yield {
-              type: 'tool_start',
-              timestamp: Date.now(),
-              tool: { name: chunk.name!, input: toolInput },
-            }
-
             const isParallelSafe = PARALLEL_SAFE_TOOLS.has(chunk.name!)
+
             if (isParallelSafe) {
-              // Fire-and-forget — no await. Puede correr en paralelo con otros.
+              // Parallel-safe tools never prompt — emit tool_start, fire-and-forget.
+              yield {
+                type: 'tool_start',
+                timestamp: Date.now(),
+                tool: { name: chunk.name!, input: toolInput },
+              }
               pending.push({
                 id: chunk.id!,
                 name: chunk.name!,
@@ -404,7 +411,46 @@ export class SqAgent {
             } else {
               // Barrera: espera todo lo pendiente antes de ejecutar sequential.
               yield* flushPending(this)
-              const { result, isError } = await runToolAsync(chunk.name!, toolInput)
+
+              // Resolve the permission BEFORE announcing the tool in the
+              // scrollback. Otherwise the user sees "▸ Edit foo.ts" pop
+              // up, the permission picker appears, and it looks as though
+              // the edit already happened even though nothing has run yet.
+              const isMcp = this.mcp?.isMcpTool(chunk.name!) || false
+              let permission: { allowed: true } | { allowed: false; message: string } = { allowed: true }
+              if (!isMcp) {
+                permission = await resolveToolPermission(chunk.name!, toolInput, {
+                  cwd,
+                  permissions: this.config.permissions,
+                  rules: this.config.rules,
+                  sandbox: this.config.sandbox,
+                  askPermission: opts?.askPermission,
+                })
+              }
+
+              if (!permission.allowed) {
+                // User denied (or a rule blocked it). Report the denial
+                // without ever emitting tool_start — the user knows what
+                // they just denied.
+                toolResults.push({ id: chunk.id!, result: permission.message, isError: true })
+                this.hooks.fire('PostToolUse', { toolName: chunk.name!, input: toolInput, cwd })
+                yield {
+                  type: 'tool_result',
+                  timestamp: Date.now(),
+                  tool: { name: chunk.name!, result: permission.message },
+                  isError: true,
+                }
+                continue
+              }
+
+              // Permission granted → announce the tool and run it with
+              // preApproved=true so executeTool doesn't prompt a second time.
+              yield {
+                type: 'tool_start',
+                timestamp: Date.now(),
+                tool: { name: chunk.name!, input: toolInput },
+              }
+              const { result, isError } = await runToolAsync(chunk.name!, toolInput, true)
               toolResults.push({ id: chunk.id!, result, isError })
               this.hooks.fire('PostToolUse', { toolName: chunk.name!, input: toolInput, cwd })
               yield {

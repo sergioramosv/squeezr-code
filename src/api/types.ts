@@ -36,8 +36,16 @@ export interface NormalizedRequest {
 export interface SubscriptionUsage {
   /** Provider al que pertenece este snapshot. */
   provider: Provider
-  /** % de la ventana de 5h ya consumido (0–1). */
+  /** % de la ventana de 5h ya consumido (0–1), agregado. */
   fiveHour: number
+  /** % de la ventana de 5h consumido por Sonnet específicamente (0–1).
+   *  Anthropic devuelve un header per-model; usamos éste en la status bar
+   *  cuando el modelo activo es un Sonnet, que es lo que muestra Claude Code. */
+  fiveHourSonnet: number
+  /** Igual, para la familia Opus. */
+  fiveHourOpus: number
+  /** Igual, para la familia Haiku. */
+  fiveHourHaiku: number
   /** Timestamp unix (ms) en el que resetea la ventana de 5h. */
   fiveHourResetAt: number
   /** % del límite semanal (0–1). */
